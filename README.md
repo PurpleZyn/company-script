@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.9.0
+**Current version:** 0.9.1
 
 ## Install
 
@@ -37,7 +37,8 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 - At-a-glance company rating, operating profit, sales, funds, and recorded trends
 
 ### Analytics
-- 7-day and 30-day locally recorded performance summaries
+- Live current-day performance shown separately from completed-day history
+- 7-day and 30-day rolling summaries use completed TCT days only
 - Average sales, operating profit, operating margin, advertising burden, and revenue per advertising dollar
 - Adjusted cash-movement history
 - Daily company-health history
