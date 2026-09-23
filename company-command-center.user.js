@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.9.2
-// @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
+// @version      1.0.0
+// @description  Complete local-first director dashboard for Torn companies: finances, staff, training, dues, stock, recruiting, optimization, alerts, and analytics.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
 // @connect      api.torn.com
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.9.2',
+        version: '1.0.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -45,6 +45,15 @@
         error: '',
         lastRefreshAt: 0,
         lastRefreshReason: '',
+        launcherPosition: null,
+        alertBaseline: {
+            initialized: false,
+            trainingKey: '',
+            paidIds: [],
+            applicationIds: [],
+            lowStockKeys: [],
+            optimizerSignature: ''
+        },
         profile: null,
         employees: [],
         stock: [],
@@ -84,13 +93,22 @@
             stockTargetDays: 7,
             stockWarningDays: 3,
             autoRefreshEnabled: true,
-            autoRefreshMinutes: 30
+            autoRefreshMinutes: 30,
+            launcherCompanyOnly: false,
+            alertsEnabled: true,
+            alertTraining: true,
+            alertDues: true,
+            alertApplications: true,
+            alertStock: true,
+            alertOptimizer: true
         }
     };
 
     let autoRefreshTimer = null;
     let autoRuntimeDay = tctDay();
     let preMidnightCapturedDay = '';
+    let lastLocationHref = location.href;
+    let suppressLauncherClick = false;
 
     const money = new Intl.NumberFormat('en-US', {
         style: 'currency',
@@ -204,6 +222,11 @@
         state.employeeHistory = store.get('employeeHistory', {}) || {};
         state.stockHistory = store.get('stockHistory', {}) || {};
         state.staffingTargets = store.get('staffingTargets', {}) || {};
+        state.launcherPosition = store.get('launcherPosition', null);
+        state.alertBaseline = Object.assign({}, state.alertBaseline, store.get('alertBaseline', {}) || {});
+        if (!Array.isArray(state.alertBaseline.paidIds)) state.alertBaseline.paidIds = [];
+        if (!Array.isArray(state.alertBaseline.applicationIds)) state.alertBaseline.applicationIds = [];
+        if (!Array.isArray(state.alertBaseline.lowStockKeys)) state.alertBaseline.lowStockKeys = [];
         state.dues = store.get('dues', {}) || {};
         state.duesResetAt = store.get('duesResetAt', {}) || {};
         state.trainingRotation = Object.assign({}, state.trainingRotation, store.get('trainingRotation', {}) || {});
@@ -235,6 +258,14 @@
 
     function saveStaffingTargets() {
         store.set('staffingTargets', state.staffingTargets);
+    }
+
+    function saveLauncherPosition() {
+        store.set('launcherPosition', state.launcherPosition);
+    }
+
+    function saveAlertBaseline() {
+        store.set('alertBaseline', state.alertBaseline);
     }
 
     function saveTrainingRotation() {
@@ -853,6 +884,266 @@
         saveSnapshots();
     }
 
+    function isCompanyArea() {
+        const value = (location.pathname + location.search + location.hash).toLowerCase();
+        if (value.indexOf('companies.php') !== -1 || value.indexOf('company.php') !== -1) return true;
+        if (value.indexOf('joblist.php') !== -1 &&
+            (value.indexOf('corp') !== -1 || value.indexOf('company') !== -1 || value.indexOf('employee') !== -1)) return true;
+        return false;
+    }
+
+    function freshnessInfo() {
+        if (state.loading) return { label: 'Refreshing…', className: 'loading' };
+        if (!state.lastRefreshAt) return { label: 'Not refreshed yet', className: 'stale' };
+
+        const ageMs = Date.now() - (state.lastRefreshAt * 1000);
+        const freshFor = Math.max(10 * 60 * 1000, autoRefreshIntervalMs() * 1.5);
+        return {
+            label: (ageMs <= freshFor ? 'Fresh · ' : 'Stale · ') + refreshAgeLabel(),
+            className: ageMs <= freshFor ? 'fresh' : 'stale'
+        };
+    }
+
+    function attentionSummary() {
+        if (!state.profile) return { count: 0, items: [] };
+
+        const items = [];
+        const finance = financeSummary();
+        if (finance.operatingProfit < 0) items.push('Finances');
+
+        const queue = trainingQueue();
+        if (queue.length && num(state.profile.trains) > 0) items.push('Training');
+
+        const ledger = monthLedger(currentMonth());
+        const duesList = duesEmployees();
+        const todayDay = new Date().getUTCDate();
+        const unpaid = duesList.filter(function (employee) {
+            return !(ledger[String(employee.id)] && ledger[String(employee.id)].paid);
+        });
+        if (todayDay >= num(state.settings.dueDay) && unpaid.length) items.push('eDVD dues');
+
+        const employeeWarnings = state.employees.some(function (employee) {
+            const eff = employee.effectiveness || {};
+            return num(eff.addiction) < 0 || num(eff.inactivity) < 0;
+        });
+        if (employeeWarnings) items.push('Employees');
+
+        const riskyStock = state.stock.some(function (item) {
+            const status = stockForecast(item).status;
+            return status === 'low' || status === 'watch';
+        });
+        if (riskyStock) items.push('Stock');
+
+        if (state.applications.length) items.push('Recruiting');
+
+        const staffing = staffingPlanSummary();
+        if (staffing.short || staffing.over) items.push('Staffing');
+
+        const optimizer = currentOptimizerSummary();
+        if (optimizer && optimizer.changes) items.push('Role optimizer');
+
+        return { count: items.length, items: items };
+    }
+
+    function applicationAlertId(application) {
+        const player = application && application.player ? application.player : {};
+        return String(application && application.id !== undefined ? application.id :
+            ((player.id || player.name || 'unknown') + '|' + num(application && application.expires_at)));
+    }
+
+    function optimizerSignature(summary) {
+        if (!summary || !summary.changes) return '';
+        const requirements = companyRoleRequirements();
+        if (!requirements) return '';
+        const roles = Object.keys(state.staffingTargets || {}).filter(function (role) {
+            return requirements[role] && num(state.staffingTargets[role]) > 0;
+        });
+        const multiplier = calibratedWorkStatMultiplier();
+        const optimized = optimizeEmployeeAssignments(roles, state.staffingTargets, multiplier);
+        if (!optimized.valid) return '';
+        return state.employees.map(function (employee) {
+            const assignment = optimized.byEmployee[String(employee.id)];
+            const currentRole = (employee.position && employee.position.name) || '';
+            return assignment && assignment.role !== currentRole ?
+                String(employee.id) + ':' + currentRole + '>' + assignment.role : '';
+        }).filter(Boolean).sort().join('|');
+    }
+
+    function currentAlertSnapshot() {
+        const ledger = monthLedger(currentMonth());
+        const paidIds = duesEmployees().filter(function (employee) {
+            return !!(ledger[String(employee.id)] && ledger[String(employee.id)].paid);
+        }).map(function (employee) { return String(employee.id); }).sort();
+
+        const applications = state.applications.map(applicationAlertId).sort();
+        const lowStock = state.stock.filter(function (item) {
+            return stockForecast(item).status === 'low';
+        }).map(stockItemKey).sort();
+
+        const latestAuto = state.trainingRotation.history.find(function (event) {
+            return event.type === 'auto';
+        });
+        const trainingKey = latestAuto ? String(latestAuto.id) + '|' + String(latestAuto.timestamp) : '';
+
+        const optimizer = currentOptimizerSummary();
+
+        return {
+            trainingKey: trainingKey,
+            paidIds: paidIds,
+            applicationIds: applications,
+            lowStockKeys: lowStock,
+            optimizerSignature: optimizerSignature(optimizer),
+            optimizer: optimizer,
+            latestAuto: latestAuto
+        };
+    }
+
+    function showToast(title, message, tab, kind) {
+        if (!state.settings.alertsEnabled) return;
+        const container = document.getElementById('tccc-toasts');
+        if (!container) return;
+
+        const toast = document.createElement('button');
+        toast.type = 'button';
+        toast.className = 'tccc-toast ' + (kind || 'info');
+        toast.innerHTML = '<strong>' + esc(title) + '</strong><span>' + esc(message) + '</span>';
+        toast.addEventListener('click', function () {
+            if (tab) state.activeTab = tab;
+            state.open = true;
+            render();
+            toast.remove();
+        });
+
+        container.appendChild(toast);
+        setTimeout(function () {
+            if (toast && toast.parentNode) toast.remove();
+        }, 9000);
+    }
+
+    function processRefreshAlerts() {
+        const current = currentAlertSnapshot();
+        const baseline = state.alertBaseline || {};
+
+        if (!baseline.initialized) {
+            state.alertBaseline = {
+                initialized: true,
+                trainingKey: current.trainingKey,
+                paidIds: current.paidIds,
+                applicationIds: current.applicationIds,
+                lowStockKeys: current.lowStockKeys,
+                optimizerSignature: current.optimizerSignature
+            };
+            saveAlertBaseline();
+            return;
+        }
+
+        if (state.settings.alertTraining && current.trainingKey && current.trainingKey !== baseline.trainingKey && current.latestAuto) {
+            const next = trainingQueue()[0];
+            showToast(
+                'Training queue advanced',
+                current.latestAuto.name + ' was trained and moved to the back.' + (next ? ' Next: ' + next.name + '.' : ''),
+                'training',
+                'info'
+            );
+        }
+
+        if (state.settings.alertDues) {
+            const oldPaid = new Set(baseline.paidIds || []);
+            current.paidIds.forEach(function (id) {
+                if (oldPaid.has(id)) return;
+                const employee = duesEmployees().find(function (entry) { return String(entry.id) === String(id); });
+                if (employee) showToast('eDVD dues paid', employee.name + ' is now marked paid for ' + currentMonth() + '.', 'dues', 'success');
+            });
+        }
+
+        if (state.settings.alertApplications) {
+            const oldApps = new Set(baseline.applicationIds || []);
+            current.applicationIds.forEach(function (id) {
+                if (oldApps.has(id)) return;
+                const application = state.applications.find(function (entry) { return applicationAlertId(entry) === id; });
+                const name = application && application.player ? (application.player.name || application.player.id) : 'A player';
+                showToast('New company application', name + ' submitted an application.', 'recruiting', 'info');
+            });
+        }
+
+        if (state.settings.alertStock) {
+            const oldLow = new Set(baseline.lowStockKeys || []);
+            const newlyLow = current.lowStockKeys.filter(function (key) { return !oldLow.has(key); });
+            if (newlyLow.length) {
+                showToast(
+                    'Low-stock warning',
+                    newlyLow.length + ' item' + (newlyLow.length === 1 ? '' : 's') + ' newly dropped below the low-stock threshold.',
+                    'stock',
+                    'warning'
+                );
+            }
+        }
+
+        if (state.settings.alertOptimizer && current.optimizerSignature &&
+            current.optimizerSignature !== baseline.optimizerSignature && current.optimizer && current.optimizer.changes) {
+            showToast(
+                'Role optimizer changed',
+                current.optimizer.changes + ' position change' + (current.optimizer.changes === 1 ? '' : 's') + ' currently recommended.',
+                'recruiting',
+                'warning'
+            );
+        }
+
+        state.alertBaseline = {
+            initialized: true,
+            trainingKey: current.trainingKey,
+            paidIds: current.paidIds,
+            applicationIds: current.applicationIds,
+            lowStockKeys: current.lowStockKeys,
+            optimizerSignature: current.optimizerSignature
+        };
+        saveAlertBaseline();
+    }
+
+    function applyLauncherPosition(launcher) {
+        if (!launcher || !state.launcherPosition) return;
+        const maxLeft = Math.max(6, window.innerWidth - launcher.offsetWidth - 6);
+        const maxTop = Math.max(6, window.innerHeight - launcher.offsetHeight - 6);
+        const left = Math.max(6, Math.min(maxLeft, num(state.launcherPosition.left)));
+        const top = Math.max(6, Math.min(maxTop, num(state.launcherPosition.top)));
+        launcher.style.left = left + 'px';
+        launcher.style.top = top + 'px';
+        launcher.style.right = 'auto';
+        launcher.style.bottom = 'auto';
+        state.launcherPosition = { left: left, top: top };
+    }
+
+    function updateLauncher() {
+        const launcher = document.getElementById('tccc-launch');
+        if (!launcher) return;
+
+        const hiddenForPage = state.settings.launcherCompanyOnly && !isCompanyArea();
+        launcher.style.display = hiddenForPage ? 'none' : 'flex';
+        if (hiddenForPage) return;
+
+        const attention = attentionSummary();
+        const badge = attention.count ? '<span class="tccc-launch-badge">' + esc(attention.count) + '</span>' : '';
+        launcher.innerHTML = '<span>COMPANY CC</span>' + badge;
+
+        const freshness = freshnessInfo();
+        launcher.title = APP.name + ' · ' + freshness.label +
+            (attention.count ? ' · ' + attention.count + ' attention categor' + (attention.count === 1 ? 'y' : 'ies') : '');
+        applyLauncherPosition(launcher);
+    }
+
+    function resetLauncherPosition() {
+        state.launcherPosition = null;
+        saveLauncherPosition();
+        const launcher = document.getElementById('tccc-launch');
+        if (launcher) {
+            launcher.style.left = '';
+            launcher.style.top = '';
+            launcher.style.right = '18px';
+            launcher.style.bottom = '82px';
+        }
+        updateLauncher();
+    }
+
     function autoRefreshIntervalMs() {
         const minutes = Math.max(15, Math.min(120, num(state.settings.autoRefreshMinutes) || 30));
         return minutes * 60 * 1000;
@@ -974,6 +1265,7 @@
             state.lastRefreshAt = Math.floor(Date.now() / 1000);
             state.lastRefreshReason = typeof reason === 'string' ? reason : 'manual';
             autoRuntimeDay = tctDay();
+            processRefreshAlerts();
         } catch (e) {
             state.error = e && e.message ? e.message : String(e);
         } finally {
@@ -1033,6 +1325,8 @@
         saveDues();
 
         state.duesScan.matches = [];
+        state.alertBaseline.paidIds = [];
+        saveAlertBaseline();
         if (state.duesScan.status === 'ready') {
             applyAutomaticDuesMatches(state.duesScan.logs || []);
         }
@@ -2627,6 +2921,19 @@
             '<label class="tccc-check"><input id="tccc-exclude-director" type="checkbox" ' + (state.settings.excludeDirector ? 'checked' : '') + '> Exclude director from monthly eDVD dues</label>' +
             '</div>' +
             '<div class="tccc-settings-divider"></div>' +
+            '<h3>Launcher & alerts</h3>' +
+            '<div class="tccc-settings-grid">' +
+            '<label class="tccc-check"><input id="tccc-launch-company-only" type="checkbox" ' + (state.settings.launcherCompanyOnly ? 'checked' : '') + '> Show COMPANY CC only in Torn\'s company area</label>' +
+            '<label class="tccc-check"><input id="tccc-alerts-enabled" type="checkbox" ' + (state.settings.alertsEnabled ? 'checked' : '') + '> Enable in-app company alerts</label>' +
+            '<label class="tccc-check"><input id="tccc-alert-training" type="checkbox" ' + (state.settings.alertTraining ? 'checked' : '') + '> Alert when the training queue advances</label>' +
+            '<label class="tccc-check"><input id="tccc-alert-dues" type="checkbox" ' + (state.settings.alertDues ? 'checked' : '') + '> Alert when eDVD dues are detected</label>' +
+            '<label class="tccc-check"><input id="tccc-alert-applications" type="checkbox" ' + (state.settings.alertApplications ? 'checked' : '') + '> Alert on new company applications</label>' +
+            '<label class="tccc-check"><input id="tccc-alert-stock" type="checkbox" ' + (state.settings.alertStock ? 'checked' : '') + '> Alert when stock becomes LOW</label>' +
+            '<label class="tccc-check"><input id="tccc-alert-optimizer" type="checkbox" ' + (state.settings.alertOptimizer ? 'checked' : '') + '> Alert when optimizer recommendations change</label>' +
+            '</div>' +
+            '<div class="tccc-setting-actions compact"><button id="tccc-reset-launcher">Reset launcher position</button></div>' +
+            '<div class="tccc-note"><strong>Launcher:</strong> drag the COMPANY CC button anywhere on screen and the position is remembered on this device. Company-area-only mode hides the launcher elsewhere in Torn; automatic refresh still continues while Torn is open.</div>' +
+            '<div class="tccc-settings-divider"></div>' +
             '<h3>Automatic refresh & history</h3>' +
             '<div class="tccc-settings-grid">' +
             '<label class="tccc-check"><input id="tccc-auto-refresh-enabled" type="checkbox" ' + (state.settings.autoRefreshEnabled ? 'checked' : '') + '> Automatically refresh while Torn is open</label>' +
@@ -2676,7 +2983,8 @@
 
         return '<div class="tccc-modal">' +
             '<header><div class="tccc-titleblock"><div class="tccc-eyebrow">TORN COMPANY COMMAND CENTER</div><h2>' + esc(companyName) + '</h2></div>' +
-            '<div class="tccc-head-actions"><button id="tccc-refresh" title="Refresh">↻</button><button id="tccc-close" title="Close">×</button></div></header>' +
+            '<div class="tccc-header-right"><div class="tccc-freshness ' + esc(freshnessInfo().className) + '"><i></i><span>' + esc(freshnessInfo().label) + '</span></div>' +
+            '<div class="tccc-head-actions"><button id="tccc-refresh" title="Refresh">↻</button><button id="tccc-close" title="Close">×</button></div></div></header>' +
             '<nav>' + tabs.map(function (tab) {
                 return '<button data-tab="' + tab[0] + '" class="' + (state.activeTab === tab[0] ? 'active' : '') + '">' + tab[1] + '</button>';
             }).join('') + '</nav>' +
@@ -2692,6 +3000,7 @@
         if (!overlay) return;
 
         overlay.classList.toggle('open', state.open);
+        updateLauncher();
         if (!state.open) return;
         overlay.innerHTML = shellHtml();
         bindUi();
@@ -2783,13 +3092,24 @@
             state.settings.extraDailyCost = Math.max(0, num(document.getElementById('tccc-extra-cost').value));
             state.settings.stockTargetDays = Math.max(1, num(document.getElementById('tccc-stock-target-days').value) || 7);
             state.settings.stockWarningDays = Math.max(0, num(document.getElementById('tccc-stock-warning-days').value));
+            state.settings.launcherCompanyOnly = !!document.getElementById('tccc-launch-company-only').checked;
+            state.settings.alertsEnabled = !!document.getElementById('tccc-alerts-enabled').checked;
+            state.settings.alertTraining = !!document.getElementById('tccc-alert-training').checked;
+            state.settings.alertDues = !!document.getElementById('tccc-alert-dues').checked;
+            state.settings.alertApplications = !!document.getElementById('tccc-alert-applications').checked;
+            state.settings.alertStock = !!document.getElementById('tccc-alert-stock').checked;
+            state.settings.alertOptimizer = !!document.getElementById('tccc-alert-optimizer').checked;
             state.settings.autoRefreshEnabled = !!document.getElementById('tccc-auto-refresh-enabled').checked;
             state.settings.autoRefreshMinutes = Math.max(15, Math.min(120, num(document.getElementById('tccc-auto-refresh-minutes').value) || 30));
             state.settings.excludeDirector = !!document.getElementById('tccc-exclude-director').checked;
             saveSettings();
+            updateLauncher();
             startAutoRefresh(false);
             refreshData('settings-save');
         });
+
+        const resetLauncher = document.getElementById('tccc-reset-launcher');
+        if (resetLauncher) resetLauncher.addEventListener('click', resetLauncherPosition);
 
         const exportBtn = document.getElementById('tccc-export');
         if (exportBtn) exportBtn.addEventListener('click', exportData);
@@ -2810,6 +3130,7 @@
             employeeHistory: state.employeeHistory,
             stockHistory: state.stockHistory,
             staffingTargets: state.staffingTargets,
+            alertBaseline: state.alertBaseline,
             dues: state.dues,
             duesResetAt: state.duesResetAt,
             trainingRotation: state.trainingRotation
@@ -2835,6 +3156,7 @@
                 if (payload.employeeHistory) state.employeeHistory = payload.employeeHistory;
                 if (payload.stockHistory) state.stockHistory = payload.stockHistory;
                 if (payload.staffingTargets) state.staffingTargets = payload.staffingTargets;
+                if (payload.alertBaseline) state.alertBaseline = Object.assign({}, state.alertBaseline, payload.alertBaseline);
                 if (payload.dues) state.dues = payload.dues;
                 if (payload.duesResetAt) state.duesResetAt = payload.duesResetAt;
                 if (payload.trainingRotation) state.trainingRotation = Object.assign({}, state.trainingRotation, payload.trainingRotation);
@@ -2850,6 +3172,7 @@
                 saveEmployeeHistory();
                 saveStockHistory();
                 saveStaffingTargets();
+                saveAlertBaseline();
                 saveDues();
                 saveTrainingRotation();
                 saveSettings();
@@ -2868,7 +3191,7 @@
         const style = document.createElement('style');
         style.id = 'tccc-style';
         style.textContent = [
-            '#tccc-launch{position:fixed;right:18px;bottom:82px;z-index:999999;background:linear-gradient(135deg,#5c36a8,#8b5cf6);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:11px 15px;font-weight:800;box-shadow:0 10px 30px rgba(0,0,0,.35);cursor:pointer;font-size:12px;letter-spacing:.3px}',
+            '#tccc-launch{position:fixed;right:18px;bottom:82px;z-index:999999;display:flex;align-items:center;gap:7px;background:linear-gradient(135deg,#5c36a8,#8b5cf6);color:#fff;border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:11px 15px;font-weight:800;box-shadow:0 10px 30px rgba(0,0,0,.35);cursor:grab;font-size:12px;letter-spacing:.3px;touch-action:none;user-select:none}.tccc-launch-badge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#ff7f8f;color:#24131a!important;font-size:10px!important;font-weight:900!important}#tccc-launch.tccc-dragging{cursor:grabbing;box-shadow:0 14px 36px rgba(0,0,0,.5)}',
             '#tccc-overlay{display:none;position:fixed;inset:0;z-index:1000000;background:rgba(10,8,16,.72);backdrop-filter:blur(5px);padding:24px;overflow:auto}',
             '#tccc-overlay.open{display:block}',
             '.tccc-modal,.tccc-modal *{box-sizing:border-box}',
@@ -2878,7 +3201,7 @@
             '.tccc-modal h2,.tccc-modal h3{margin:0!important;color:#f4f0f8!important;font-family:Arial,sans-serif!important;font-weight:800!important;letter-spacing:0!important;text-transform:none!important;text-shadow:none!important}',
             '.tccc-modal h2{display:block!important;font-size:24px!important;line-height:1.12!important}.tccc-modal h3{font-size:17px!important;line-height:1.25!important}',
             '.tccc-eyebrow{display:block!important;position:static!important;font-size:10px!important;line-height:1.2!important;font-weight:900!important;letter-spacing:1.9px!important;color:#b99cff!important;margin:0!important;padding:0!important;text-transform:uppercase!important}',
-            '.tccc-head-actions{display:flex;gap:8px;flex:0 0 auto}.tccc-head-actions button{width:38px;height:38px;border-radius:10px;border:1px solid #4a3d57;background:#292231;color:#fff!important;font-size:20px;line-height:1;cursor:pointer}',
+            '.tccc-header-right{display:flex;align-items:center;gap:10px}.tccc-freshness{display:flex;align-items:center;gap:6px;border:1px solid #44394d;background:#1b1721;border-radius:999px;padding:6px 9px;color:#aaa2b3!important;font-size:10px}.tccc-freshness i{width:7px;height:7px;border-radius:50%;background:#9b8da5}.tccc-freshness.fresh i{background:#79d69f}.tccc-freshness.stale i{background:#f5c781}.tccc-freshness.loading i{background:#b394ff;animation:tccc-pulse 1s ease-in-out infinite}@keyframes tccc-pulse{50%{opacity:.35}}.tccc-head-actions{display:flex;gap:8px;flex:0 0 auto}.tccc-head-actions button{width:38px;height:38px;border-radius:10px;border:1px solid #4a3d57;background:#292231;color:#fff!important;font-size:20px;line-height:1;cursor:pointer}',
             '.tccc-modal nav{display:flex;gap:6px;padding:9px 14px;background:#121016;border-bottom:1px solid #382f41;overflow-x:auto}',
             '.tccc-modal nav button{white-space:nowrap;border:0;background:transparent;color:#bbb3c4!important;padding:10px 12px;border-radius:8px;font-size:13px!important;line-height:1.1!important;font-weight:700!important;cursor:pointer}',
             '.tccc-modal nav button:hover{background:#211b29;color:#f3eff8!important}.tccc-modal nav button.active{background:#7449c8;color:#fff!important}',
@@ -2893,7 +3216,7 @@
             '.tccc-brief-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.tccc-brief-grid button{display:flex;flex-direction:column;align-items:flex-start;text-align:left;min-height:105px;background:#19151e;border:1px solid #413747;border-radius:10px;padding:12px;cursor:pointer}.tccc-brief-grid button span{font-size:9px!important;letter-spacing:.65px;font-weight:900!important;color:#aaa2b3!important}.tccc-brief-grid button strong{font-size:16px!important;line-height:1.2;color:#f3edf7!important;margin-top:7px}.tccc-brief-grid button small{font-size:10px!important;line-height:1.35;color:#aaa2b3!important;margin-top:5px}.tccc-brief-grid button.ok{border-color:#315e46}.tccc-brief-grid button.warn{border-color:#725629}.tccc-brief-grid button.danger{border-color:#7e3948}.tccc-brief-grid button.info{border-color:#5d4780}.tccc-brief-grid button:hover{background:#211a29}.tccc-overview-trend,.tccc-analytics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-overview-trend>div,.tccc-analytics-grid>div{background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px 11px}.tccc-overview-trend span,.tccc-analytics-grid span{display:block;color:#aaa2b3!important;font-size:9px;text-transform:uppercase;letter-spacing:.45px;font-weight:800}.tccc-overview-trend strong,.tccc-analytics-grid strong{display:block;color:#f2edf6!important;font-size:14px;margin-top:5px}.tccc-star-history{display:flex;gap:8px;flex-wrap:wrap}.tccc-star-history>div{display:flex;flex-direction:column;min-width:130px;background:#19151e;border:1px solid #413747;border-radius:8px;padding:10px}.tccc-star-history span{font-size:9px;color:#aaa2b3!important}.tccc-star-history strong{font-size:18px;color:#c6a9ff!important;margin-top:3px}.tccc-star-history small{font-size:8px;color:#8f8798!important;margin-top:3px}.tccc-day-state{display:inline-block;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-day-state.live{background:#59421f;color:#f5c781!important}.tccc-day-state.complete{background:#204b34;color:#8ee3ae!important}.tccc-live-row td{background:rgba(245,199,129,.03)!important}.tccc-trend-waiting{grid-column:span 1}',
             '.tccc-attention{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}.tccc-attention button{display:flex;flex-direction:column;text-align:left;background:#18141d;border:1px solid #413747;border-radius:10px;padding:13px;color:#e7e1ed!important;cursor:pointer}.tccc-attention button:hover{border-color:#674f82;background:#1d1724}.tccc-attention strong{font-size:18px;line-height:1.15;color:#c2a4ff!important}.tccc-attention span{font-size:11px;line-height:1.35;margin-top:5px;color:#b0a8b8!important}',
             '.tccc-health{margin-top:12px}.tccc-health-row{margin-bottom:12px}.tccc-health-row>div:first-child{display:flex;justify-content:space-between;font-size:12px;line-height:1.3;color:#e8e2ed!important;margin-bottom:6px}.tccc-health-row b{color:#fff!important}.tccc-meter{height:8px;background:#151219;border-radius:99px;overflow:hidden}.tccc-meter span{display:block;height:100%;background:linear-gradient(90deg,#704bc0,#b394ff)}',
-            '.tccc-note{font-size:11px;line-height:1.55;color:#b2aaba!important;padding:11px 13px;border-left:3px solid #7654bd;background:#19151e;border-radius:6px}.tccc-note strong{color:#e8dfff!important}',
+            '.tccc-note{font-size:11px;line-height:1.55;color:#b2aaba!important;padding:11px 13px;border-left:3px solid #7654bd;background:#19151e;border-radius:6px}.tccc-note strong{color:#e8dfff!important}.tccc-setting-actions.compact{margin:10px 0 12px}#tccc-toasts{position:fixed;right:18px;top:18px;z-index:1000002;display:flex;flex-direction:column;gap:8px;width:min(360px,calc(100vw - 36px));pointer-events:none}.tccc-toast{pointer-events:auto;display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:#211b29;border:1px solid #5b4a68;border-left:4px solid #8b5cf6;border-radius:10px;padding:11px 13px;color:#eee8f4!important;box-shadow:0 12px 36px rgba(0,0,0,.4);cursor:pointer}.tccc-toast.success{border-left-color:#79d69f}.tccc-toast.warning{border-left-color:#f5c781}.tccc-toast strong{font-size:12px!important;color:#f4eff8!important}.tccc-toast span{font-size:10px!important;line-height:1.4;color:#b8afc0!important;margin-top:3px}',
             '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}.tccc-fund-badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:9px!important;font-weight:900!important;letter-spacing:.5px}.tccc-fund-badge.deposit{background:#1f4b34;color:#8fe0ae!important}.tccc-fund-badge.withdrawal{background:#582630;color:#ff9aa7!important}.tccc-fund-badge.other{background:#3a3341;color:#c4bbc9!important}.tccc-cash-equation{display:grid;grid-template-columns:minmax(150px,1fr) auto minmax(130px,1fr) auto minmax(130px,1fr) auto minmax(170px,1.2fr);gap:10px;align-items:stretch}.tccc-cash-equation>div{display:flex;flex-direction:column;justify-content:center;gap:5px;background:#19151e;border:1px solid #403649;border-radius:9px;padding:12px}.tccc-cash-equation>div.result{border-color:#7654bd;background:rgba(118,84,189,.08)}.tccc-cash-equation>div span{font-size:10px;color:#aaa2b3!important;text-transform:uppercase;font-weight:800;letter-spacing:.5px}.tccc-cash-equation>div strong{font-size:16px;color:#f4f0f8!important}.tccc-cash-equation>b{display:flex;align-items:center;color:#a58fbe!important;font-size:19px}',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
             '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}.tccc-training-next small{display:block;margin-top:7px;color:#c0b4cc!important;font-size:11px}.tccc-next-meta{text-align:right}.tccc-next-meta strong{font-size:20px!important}.tccc-training-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.tccc-training-summary>div{background:#211b29;border:1px solid #43384d;border-radius:10px;padding:12px 13px}.tccc-training-summary span{display:block;color:#aaa1b2!important;font-size:9px;text-transform:uppercase;letter-spacing:.65px;font-weight:800}.tccc-training-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:5px}.tccc-training-head{align-items:flex-start}.tccc-training-head>div span{display:block;margin-top:4px}.tccc-small-action{border:1px solid #564568;background:#2b2334;color:#e8dff0!important;border-radius:8px;padding:8px 10px;font-size:10px!important;font-weight:800!important;cursor:pointer;white-space:nowrap}.tccc-small-action:hover{border-color:#7c5fb0;background:#33273f}.tccc-queue-actions{display:flex;gap:5px;align-items:center}.tccc-queue-actions button{border:1px solid #4b4054;background:#241e2b;color:#d9d1df!important;border-radius:6px;min-width:30px;height:28px;padding:0 7px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-queue-actions button:hover:not(:disabled){background:#3b2a50;border-color:#7654bd;color:#fff!important}.tccc-queue-actions button:disabled{opacity:.28;cursor:not-allowed}.tccc-queue-actions button[data-train-action="next"]{color:#c6a9ff!important}.tccc-queue-actions button[data-train-action="skip"]{color:#f2bf7b!important}.tccc-training-log{display:flex;flex-direction:column;gap:7px}.tccc-training-log-row{display:grid;grid-template-columns:90px minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #39313f;border-radius:8px;background:#1a161f}.tccc-training-log-row>div{min-width:0}.tccc-training-log-row strong{display:block;color:#eee8f4!important;font-size:12px}.tccc-training-log-row>div span{display:block;color:#aaa2b2!important;font-size:10px;margin-top:2px}.tccc-training-log-row time{color:#918999!important;font-size:10px;white-space:nowrap}.tccc-rotation-badge{display:inline-block;text-align:center;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-rotation-badge.auto{background:#1f4b34;color:#8fe0ae!important}.tccc-rotation-badge.skip{background:#5a4021;color:#f5c781!important}.tccc-rotation-badge.reset{background:#3b304a;color:#cbb6e7!important}.tccc-training-log-empty{color:#aaa2b2!important;font-size:11px;padding:8px 2px}',
@@ -2904,36 +3227,107 @@
             '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number],.tccc-settings input[type=text]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
             '.tccc-empty{text-align:center;padding:70px 20px;color:#eee8f4}.tccc-empty p{color:#b3aabb!important;max-width:560px;margin:12px auto 18px;line-height:1.55}',
             '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-effectiveness-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-employee-detail-head{flex-direction:column}.tccc-trend-note{text-align:left}.tccc-position-mix,.tccc-recruit-status{grid-template-columns:1fr}.tccc-staffing-editor{grid-template-columns:1fr}.tccc-optimizer-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-manager-callout{grid-template-columns:1fr}.tccc-brief-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-modal main{padding:10px}}',
-            '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-brief-grid{grid-template-columns:1fr}.tccc-overview-trend,.tccc-analytics-grid{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
+            '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-brief-grid{grid-template-columns:1fr}.tccc-overview-trend,.tccc-analytics-grid{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-freshness{display:none}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
         ].join('\n');
         document.head.appendChild(style);
     }
 
-    function mount() {
-        if (document.getElementById('tccc-launch')) return;
-        injectCss();
+    function bindLauncherDrag(launch) {
+        let drag = null;
 
-        const launch = document.createElement('button');
-        launch.id = 'tccc-launch';
-        launch.textContent = 'COMPANY CC';
-        launch.title = APP.name;
-        launch.addEventListener('click', function () {
-            state.open = true;
-            render();
-            if (state.settings.apiKey && !state.profile && !state.loading) refreshData('open-dashboard');
-        });
-
-        const overlay = document.createElement('div');
-        overlay.id = 'tccc-overlay';
-        overlay.addEventListener('click', function (event) {
-            if (event.target === overlay) {
-                state.open = false;
-                render();
+        launch.addEventListener('pointerdown', function (event) {
+            if (event.button !== undefined && event.button !== 0) return;
+            const rect = launch.getBoundingClientRect();
+            drag = {
+                pointerId: event.pointerId,
+                offsetX: event.clientX - rect.left,
+                offsetY: event.clientY - rect.top,
+                startX: event.clientX,
+                startY: event.clientY,
+                moved: false
+            };
+            if (launch.setPointerCapture && event.pointerId !== undefined) {
+                try { launch.setPointerCapture(event.pointerId); } catch (e) {}
             }
         });
 
-        document.body.appendChild(launch);
-        document.body.appendChild(overlay);
+        launch.addEventListener('pointermove', function (event) {
+            if (!drag || (event.pointerId !== undefined && drag.pointerId !== event.pointerId)) return;
+
+            if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 5) {
+                drag.moved = true;
+                launch.classList.add('tccc-dragging');
+            }
+            if (!drag.moved) return;
+
+            const maxLeft = Math.max(6, window.innerWidth - launch.offsetWidth - 6);
+            const maxTop = Math.max(6, window.innerHeight - launch.offsetHeight - 6);
+            const left = Math.max(6, Math.min(maxLeft, event.clientX - drag.offsetX));
+            const top = Math.max(6, Math.min(maxTop, event.clientY - drag.offsetY));
+
+            launch.style.left = left + 'px';
+            launch.style.top = top + 'px';
+            launch.style.right = 'auto';
+            launch.style.bottom = 'auto';
+        });
+
+        function finishDrag(event) {
+            if (!drag || (event.pointerId !== undefined && drag.pointerId !== event.pointerId)) return;
+            if (drag.moved) {
+                const rect = launch.getBoundingClientRect();
+                state.launcherPosition = { left: Math.round(rect.left), top: Math.round(rect.top) };
+                saveLauncherPosition();
+                suppressLauncherClick = true;
+                setTimeout(function () { suppressLauncherClick = false; }, 0);
+            }
+            launch.classList.remove('tccc-dragging');
+            drag = null;
+        }
+
+        launch.addEventListener('pointerup', finishDrag);
+        launch.addEventListener('pointercancel', finishDrag);
+    }
+
+    function mount() {
+        injectCss();
+
+        let launch = document.getElementById('tccc-launch');
+        if (!launch) {
+            launch = document.createElement('button');
+            launch.id = 'tccc-launch';
+            launch.type = 'button';
+            launch.title = APP.name;
+            bindLauncherDrag(launch);
+            launch.addEventListener('click', function () {
+                if (suppressLauncherClick) return;
+                state.open = true;
+                render();
+                if (state.settings.apiKey && !state.profile && !state.loading) refreshData('open-dashboard');
+            });
+            document.body.appendChild(launch);
+        }
+
+        let overlay = document.getElementById('tccc-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'tccc-overlay';
+            overlay.addEventListener('click', function (event) {
+                if (event.target === overlay) {
+                    state.open = false;
+                    render();
+                }
+            });
+            document.body.appendChild(overlay);
+        }
+
+        let toasts = document.getElementById('tccc-toasts');
+        if (!toasts) {
+            toasts = document.createElement('div');
+            toasts.id = 'tccc-toasts';
+            document.body.appendChild(toasts);
+        }
+
+        updateLauncher();
     }
 
     loadLocalState();
@@ -2942,7 +3336,14 @@
 
     // Torn is a SPA in several areas. Re-mount if page navigation replaces body content.
     const observer = new MutationObserver(function () {
-        if (!document.getElementById('tccc-launch') || !document.getElementById('tccc-overlay')) mount();
+        if (!document.getElementById('tccc-launch') || !document.getElementById('tccc-overlay') || !document.getElementById('tccc-toasts')) {
+            mount();
+        }
+        if (location.href !== lastLocationHref) {
+            lastLocationHref = location.href;
+            updateLauncher();
+        }
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener('resize', updateLauncher);
 })();
