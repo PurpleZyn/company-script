@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.5.1
+// @version      0.6.0
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.5.1',
+        version: '0.6.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -38,6 +38,7 @@
         fundNews: [],
         snapshots: {},
         employeeHistory: {},
+        stockHistory: {},
         employeeFilter: 'all',
         expandedEmployeeId: '',
         dues: {},
@@ -63,7 +64,9 @@
             edvdQty: 1,
             dueDay: 1,
             excludeDirector: true,
-            extraDailyCost: 0
+            extraDailyCost: 0,
+            stockTargetDays: 7,
+            stockWarningDays: 3
         }
     };
 
@@ -177,6 +180,7 @@
         state.settings = Object.assign({}, state.settings, savedSettings || {});
         state.snapshots = store.get('snapshots', {}) || {};
         state.employeeHistory = store.get('employeeHistory', {}) || {};
+        state.stockHistory = store.get('stockHistory', {}) || {};
         state.dues = store.get('dues', {}) || {};
         state.duesResetAt = store.get('duesResetAt', {}) || {};
         state.trainingRotation = Object.assign({}, state.trainingRotation, store.get('trainingRotation', {}) || {});
@@ -200,6 +204,10 @@
 
     function saveEmployeeHistory() {
         store.set('employeeHistory', state.employeeHistory);
+    }
+
+    function saveStockHistory() {
+        store.set('stockHistory', state.stockHistory);
     }
 
     function saveTrainingRotation() {
@@ -527,6 +535,108 @@
         };
     }
 
+    function stockItemKey(item) {
+        if (item && item.id !== undefined && item.id !== null) return 'id:' + String(item.id);
+        return 'name:' + String((item && item.name) || '').toLowerCase();
+    }
+
+    function saveStockSnapshot() {
+        if (!state.stock.length) return;
+
+        const day = tctDay();
+        const now = Math.floor(Date.now() / 1000);
+        const items = {};
+
+        state.stock.forEach(function (item) {
+            const key = stockItemKey(item);
+            items[key] = {
+                id: item.id !== undefined ? item.id : null,
+                name: item.name || '',
+                inStock: num(item.in_stock),
+                onOrder: num(item.on_order),
+                sold: num(item.sold_amount),
+                soldWorth: num(item.sold_worth),
+                cost: num(item.cost),
+                sellingPrice: num(item.price !== undefined ? item.price : item.selling_price)
+            };
+        });
+
+        state.stockHistory[day] = {
+            capturedAt: now,
+            items: items
+        };
+
+        const days = Object.keys(state.stockHistory).sort();
+        while (days.length > 90) {
+            delete state.stockHistory[days.shift()];
+        }
+        saveStockHistory();
+    }
+
+    function stockSalesSamples(item, maxDays) {
+        const key = stockItemKey(item);
+        const today = tctDay();
+        const days = Object.keys(state.stockHistory).sort().reverse();
+        const completed = [];
+        const current = [];
+
+        days.forEach(function (day) {
+            const snapshot = state.stockHistory[day];
+            const record = snapshot && snapshot.items ? snapshot.items[key] : null;
+            if (!record) return;
+            if (day === today) current.push(num(record.sold));
+            else completed.push(num(record.sold));
+        });
+
+        const limit = Math.max(1, num(maxDays) || 7);
+        if (completed.length) return completed.slice(0, limit);
+        if (current.length) return current.slice(0, 1);
+        return [];
+    }
+
+    function stockForecast(item) {
+        const samples = stockSalesSamples(item, 7);
+        const avgDaily = samples.length ?
+            samples.reduce(function (total, sold) { return total + sold; }, 0) / samples.length :
+            num(item.sold_amount);
+
+        const inStock = num(item.in_stock);
+        const onOrder = num(item.on_order);
+        const totalAvailable = inStock + onOrder;
+        const onHandDays = avgDaily > 0 ? inStock / avgDaily : Infinity;
+        const totalDays = avgDaily > 0 ? totalAvailable / avgDaily : Infinity;
+        const targetDays = Math.max(1, num(state.settings.stockTargetDays) || 7);
+        const warningDays = Math.max(0, num(state.settings.stockWarningDays) || 3);
+        const suggested = avgDaily > 0 ? Math.max(0, Math.ceil((avgDaily * targetDays) - totalAvailable)) : 0;
+        const runoutAt = Number.isFinite(totalDays) ?
+            Math.floor(Date.now() / 1000) + Math.round(totalDays * 86400) : 0;
+
+        let status = 'healthy';
+        if (avgDaily <= 0) status = 'no-sales';
+        else if (totalDays < warningDays) status = 'low';
+        else if (totalDays < targetDays) status = 'watch';
+
+        return {
+            avgDaily: avgDaily,
+            samples: samples.length,
+            onHandDays: onHandDays,
+            totalDays: totalDays,
+            targetDays: targetDays,
+            warningDays: warningDays,
+            suggested: suggested,
+            runoutAt: runoutAt,
+            status: status
+        };
+    }
+
+    function formatForecastDate(timestamp) {
+        if (!timestamp) return '—';
+        return new Date(timestamp * 1000).toLocaleDateString(undefined, {
+            month: 'short',
+            day: 'numeric'
+        });
+    }
+
     function saveEmployeeSnapshot() {
         if (!state.employees.length) return;
 
@@ -738,6 +848,7 @@
             syncTrainingRotation();
             await scanDuesLogs();
             saveEmployeeSnapshot();
+            saveStockSnapshot();
             saveTodaySnapshot();
         } catch (e) {
             state.error = e && e.message ? e.message : String(e);
@@ -1031,7 +1142,10 @@
         html += '<button data-tabgo="training"><strong>' + (next ? esc(next.name) : 'Nobody') + '</strong><span>Next in training rotation</span></button>';
         html += '<button data-tabgo="dues"><strong>' + unpaid.length + '</strong><span>Unpaid for ' + esc(currentMonth()) + '</span></button>';
         html += '<button data-tabgo="employees"><strong>' + warningEmployees.length + '</strong><span>Employee effectiveness warnings</span></button>';
-        html += '<button data-tabgo="stock"><strong>' + state.stock.filter(function (i) { return num(i.sold_amount) > 0 && num(i.in_stock) / num(i.sold_amount) < 2; }).length + '</strong><span>Possible low-stock items</span></button>';
+        const lowStockCount = state.stock.filter(function (item) {
+            return stockForecast(item).status === 'low';
+        }).length;
+        html += '<button data-tabgo="stock"><strong>' + lowStockCount + '</strong><span>Low-stock forecast warnings</span></button>';
         html += '</div></section>';
 
         html += '<section class="tccc-panel"><h3>Company health</h3><div class="tccc-health">';
@@ -1451,20 +1565,89 @@
     function stockHtml() {
         if (!state.profile) return emptyConnectHtml();
 
-        let html = '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Stock</h3><span>Current stock and sales pace</span></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Item</th><th>In stock</th><th>On order</th><th>Sold</th><th>Sales value</th><th>Est. COGS</th><th>Cover</th></tr></thead><tbody>';
+        const forecasts = state.stock.map(function (item) {
+            return { item: item, forecast: stockForecast(item) };
+        });
 
-        state.stock.forEach(function (item) {
-            const sold = num(item.sold_amount);
-            const cover = sold > 0 ? (num(item.in_stock) + num(item.on_order)) / sold : Infinity;
-            html += '<tr><td>' + esc(item.name) + '</td><td>' + esc(num(item.in_stock)) + '</td><td>' +
-                esc(num(item.on_order)) + '</td><td>' + esc(sold) + '</td><td>' + esc(money.format(num(item.sold_worth))) +
-                '</td><td>' + esc(money.format(sold * num(item.cost))) + '</td><td class="' +
-                (cover < 2 ? 'tccc-negative' : '') + '">' + (Number.isFinite(cover) ? esc(cover.toFixed(1) + ' days') : 'No sales') + '</td></tr>';
+        const lowCount = forecasts.filter(function (row) { return row.forecast.status === 'low'; }).length;
+        const watchCount = forecasts.filter(function (row) { return row.forecast.status === 'watch'; }).length;
+        const suggestedUnits = forecasts.reduce(function (total, row) {
+            return total + row.forecast.suggested;
+        }, 0);
+        const historyDays = Object.keys(state.stockHistory).length;
+        const finiteCover = forecasts.filter(function (row) {
+            return Number.isFinite(row.forecast.totalDays);
+        });
+        const avgCover = finiteCover.length ?
+            finiteCover.reduce(function (total, row) { return total + row.forecast.totalDays; }, 0) / finiteCover.length : 0;
+
+        forecasts.sort(function (a, b) {
+            const aDays = Number.isFinite(a.forecast.totalDays) ? a.forecast.totalDays : 999999;
+            const bDays = Number.isFinite(b.forecast.totalDays) ? b.forecast.totalDays : 999999;
+            return aDays - bDays;
+        });
+
+        let html = cards([
+            {
+                label: 'Low Stock',
+                value: lowCount,
+                sub: 'Below ' + state.settings.stockWarningDays + ' days projected cover',
+                className: lowCount ? 'bad' : 'good'
+            },
+            {
+                label: 'Watch List',
+                value: watchCount,
+                sub: 'Below ' + state.settings.stockTargetDays + '-day target'
+            },
+            {
+                label: 'Avg. Projected Cover',
+                value: avgCover ? avgCover.toFixed(1) + ' days' : '—',
+                sub: 'Including stock currently on order'
+            },
+            {
+                label: 'Suggested Reorder',
+                value: suggestedUnits.toLocaleString() + ' units',
+                sub: 'To reach ' + state.settings.stockTargetDays + ' days of cover'
+            },
+            {
+                label: 'History',
+                value: historyDays + ' day' + (historyDays === 1 ? '' : 's'),
+                sub: 'Forecast improves as daily snapshots accumulate'
+            }
+        ]);
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Stock forecast</h3><span>Sorted by lowest projected coverage first</span></div></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Item</th><th>Status</th><th>In Stock</th><th>On Order</th><th>Today Sold</th><th>Avg / Day</th><th>On-Hand Cover</th><th>Total Cover</th><th>Projected Runout</th><th>Suggested Reorder</th></tr></thead><tbody>';
+
+        forecasts.forEach(function (row) {
+            const item = row.item;
+            const forecast = row.forecast;
+            const statusLabel = forecast.status === 'low' ? 'LOW' :
+                forecast.status === 'watch' ? 'WATCH' :
+                forecast.status === 'no-sales' ? 'NO SALES' : 'HEALTHY';
+            const statusClass = forecast.status === 'low' ? 'bad' :
+                forecast.status === 'watch' ? 'watch' :
+                forecast.status === 'healthy' ? 'good' : 'neutral';
+
+            html += '<tr><td><strong>' + esc(item.name) + '</strong></td>' +
+                '<td><span class="tccc-stock-status ' + statusClass + '">' + esc(statusLabel) + '</span></td>' +
+                '<td>' + esc(num(item.in_stock).toLocaleString()) + '</td>' +
+                '<td>' + esc(num(item.on_order).toLocaleString()) + '</td>' +
+                '<td>' + esc(num(item.sold_amount).toLocaleString()) + '</td>' +
+                '<td>' + esc(forecast.avgDaily.toFixed(1)) + '<small class="tccc-stock-sample"> (' + esc(forecast.samples) + 'd)</small></td>' +
+                '<td class="' + (Number.isFinite(forecast.onHandDays) && forecast.onHandDays < forecast.warningDays ? 'tccc-negative' : '') + '">' +
+                (Number.isFinite(forecast.onHandDays) ? esc(forecast.onHandDays.toFixed(1) + ' days') : '—') + '</td>' +
+                '<td class="' + (forecast.status === 'low' ? 'tccc-negative' : '') + '">' +
+                (Number.isFinite(forecast.totalDays) ? esc(forecast.totalDays.toFixed(1) + ' days') : '—') + '</td>' +
+                '<td>' + esc(formatForecastDate(forecast.runoutAt)) + '</td>' +
+                '<td class="' + (forecast.suggested > 0 ? 'tccc-warning' : '') + '">' +
+                (forecast.suggested > 0 ? esc(forecast.suggested.toLocaleString()) : '—') + '</td></tr>';
         });
 
         html += '</tbody></table></div></section>';
-        html += '<div class="tccc-note">Stock cover uses current sold amount as the pace denominator, so treat it as a quick warning signal rather than a forecast until we have several days of stored sales history.</div>';
+
+        html += '<div class="tccc-note"><strong>Forecast method:</strong> once at least one completed TCT day exists, average daily sales use up to the most recent 7 completed daily snapshots. Until then, the script uses today\'s current sold amount as the temporary pace. Total cover includes stock already on order. Suggested reorder is the extra quantity needed to reach your configured ' +
+            esc(state.settings.stockTargetDays) + '-day target after counting current stock and existing orders. These are planning estimates, not automatic purchase instructions.</div>';
         return html;
     }
 
@@ -1477,6 +1660,8 @@
             '<label>Monthly due day <input id="tccc-due-day" type="number" min="1" max="28" step="1" value="' + esc(state.settings.dueDay) + '"></label>' +
             '<label>Dues message keywords <input id="tccc-dues-keywords" type="text" value="' + esc(state.settings.duesKeywords) + '" placeholder="CHAP,DUES"></label>' +
             '<label>Other daily company cost <input id="tccc-extra-cost" type="number" min="0" step="1000" value="' + esc(state.settings.extraDailyCost) + '"></label>' +
+            '<label>Stock target days <input id="tccc-stock-target-days" type="number" min="1" max="60" step="1" value="' + esc(state.settings.stockTargetDays) + '"></label>' +
+            '<label>Low-stock warning days <input id="tccc-stock-warning-days" type="number" min="0" max="60" step="1" value="' + esc(state.settings.stockWarningDays) + '"></label>' +
             '<label class="tccc-check"><input id="tccc-exclude-director" type="checkbox" ' + (state.settings.excludeDirector ? 'checked' : '') + '> Exclude director from monthly eDVD dues</label>' +
             '</div>' +
             '<div class="tccc-settings-divider"></div>' +
@@ -1620,6 +1805,8 @@
             state.settings.edvdQty = Math.max(0, num(document.getElementById('tccc-edvd-qty').value));
             state.settings.dueDay = Math.min(28, Math.max(1, num(document.getElementById('tccc-due-day').value) || 1));
             state.settings.extraDailyCost = Math.max(0, num(document.getElementById('tccc-extra-cost').value));
+            state.settings.stockTargetDays = Math.max(1, num(document.getElementById('tccc-stock-target-days').value) || 7);
+            state.settings.stockWarningDays = Math.max(0, num(document.getElementById('tccc-stock-warning-days').value));
             state.settings.excludeDirector = !!document.getElementById('tccc-exclude-director').checked;
             saveSettings();
             refreshData();
@@ -1642,6 +1829,7 @@
             settings: Object.assign({}, state.settings, { apiKey: '', duesApiKey: '' }),
             snapshots: state.snapshots,
             employeeHistory: state.employeeHistory,
+            stockHistory: state.stockHistory,
             dues: state.dues,
             duesResetAt: state.duesResetAt,
             trainingRotation: state.trainingRotation
@@ -1665,6 +1853,7 @@
                 const payload = JSON.parse(reader.result);
                 if (payload.snapshots) state.snapshots = payload.snapshots;
                 if (payload.employeeHistory) state.employeeHistory = payload.employeeHistory;
+                if (payload.stockHistory) state.stockHistory = payload.stockHistory;
                 if (payload.dues) state.dues = payload.dues;
                 if (payload.duesResetAt) state.duesResetAt = payload.duesResetAt;
                 if (payload.trainingRotation) state.trainingRotation = Object.assign({}, state.trainingRotation, payload.trainingRotation);
@@ -1678,6 +1867,7 @@
                 }
                 saveSnapshots();
                 saveEmployeeHistory();
+                saveStockHistory();
                 saveDues();
                 saveTrainingRotation();
                 saveSettings();
@@ -1724,6 +1914,7 @@
             '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}.tccc-fund-badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:9px!important;font-weight:900!important;letter-spacing:.5px}.tccc-fund-badge.deposit{background:#1f4b34;color:#8fe0ae!important}.tccc-fund-badge.withdrawal{background:#582630;color:#ff9aa7!important}.tccc-fund-badge.other{background:#3a3341;color:#c4bbc9!important}.tccc-cash-equation{display:grid;grid-template-columns:minmax(150px,1fr) auto minmax(130px,1fr) auto minmax(130px,1fr) auto minmax(170px,1.2fr);gap:10px;align-items:stretch}.tccc-cash-equation>div{display:flex;flex-direction:column;justify-content:center;gap:5px;background:#19151e;border:1px solid #403649;border-radius:9px;padding:12px}.tccc-cash-equation>div.result{border-color:#7654bd;background:rgba(118,84,189,.08)}.tccc-cash-equation>div span{font-size:10px;color:#aaa2b3!important;text-transform:uppercase;font-weight:800;letter-spacing:.5px}.tccc-cash-equation>div strong{font-size:16px;color:#f4f0f8!important}.tccc-cash-equation>b{display:flex;align-items:center;color:#a58fbe!important;font-size:19px}',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
             '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}.tccc-training-next small{display:block;margin-top:7px;color:#c0b4cc!important;font-size:11px}.tccc-next-meta{text-align:right}.tccc-next-meta strong{font-size:20px!important}.tccc-training-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.tccc-training-summary>div{background:#211b29;border:1px solid #43384d;border-radius:10px;padding:12px 13px}.tccc-training-summary span{display:block;color:#aaa1b2!important;font-size:9px;text-transform:uppercase;letter-spacing:.65px;font-weight:800}.tccc-training-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:5px}.tccc-training-head{align-items:flex-start}.tccc-training-head>div span{display:block;margin-top:4px}.tccc-small-action{border:1px solid #564568;background:#2b2334;color:#e8dff0!important;border-radius:8px;padding:8px 10px;font-size:10px!important;font-weight:800!important;cursor:pointer;white-space:nowrap}.tccc-small-action:hover{border-color:#7c5fb0;background:#33273f}.tccc-queue-actions{display:flex;gap:5px;align-items:center}.tccc-queue-actions button{border:1px solid #4b4054;background:#241e2b;color:#d9d1df!important;border-radius:6px;min-width:30px;height:28px;padding:0 7px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-queue-actions button:hover:not(:disabled){background:#3b2a50;border-color:#7654bd;color:#fff!important}.tccc-queue-actions button:disabled{opacity:.28;cursor:not-allowed}.tccc-queue-actions button[data-train-action="next"]{color:#c6a9ff!important}.tccc-queue-actions button[data-train-action="skip"]{color:#f2bf7b!important}.tccc-training-log{display:flex;flex-direction:column;gap:7px}.tccc-training-log-row{display:grid;grid-template-columns:90px minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #39313f;border-radius:8px;background:#1a161f}.tccc-training-log-row>div{min-width:0}.tccc-training-log-row strong{display:block;color:#eee8f4!important;font-size:12px}.tccc-training-log-row>div span{display:block;color:#aaa2b2!important;font-size:10px;margin-top:2px}.tccc-training-log-row time{color:#918999!important;font-size:10px;white-space:nowrap}.tccc-rotation-badge{display:inline-block;text-align:center;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-rotation-badge.auto{background:#1f4b34;color:#8fe0ae!important}.tccc-rotation-badge.skip{background:#5a4021;color:#f5c781!important}.tccc-rotation-badge.reset{background:#3b304a;color:#cbb6e7!important}.tccc-training-log-empty{color:#aaa2b2!important;font-size:11px;padding:8px 2px}',
+            '.tccc-stock-status{display:inline-block;border-radius:999px;padding:5px 8px;font-size:9px!important;font-weight:900!important}.tccc-stock-status.good{background:#204b34;color:#8ee3ae!important}.tccc-stock-status.watch{background:#59421f;color:#f5c781!important}.tccc-stock-status.bad{background:#55252e;color:#ff98a4!important}.tccc-stock-status.neutral{background:#3a3341;color:#c4bbc9!important}.tccc-stock-sample{color:#8f8798!important;font-size:9px!important}.tccc-modal .tccc-warning,.tccc-modal td.tccc-warning{color:#f5c781!important;font-weight:800!important}',
             '.tccc-filterbar{display:flex;gap:7px;flex-wrap:wrap;margin:4px 0 12px}.tccc-filterbar button{border:1px solid #4c4056;background:#1c1722;color:#bfb6c7!important;border-radius:999px;padding:7px 10px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-filterbar button.active{background:#7449c8;border-color:#865ee0;color:#fff!important}.tccc-employee-status{display:inline-block;border-radius:999px;padding:5px 8px;font-size:9px!important;font-weight:900!important}.tccc-employee-status.good{background:#204b34;color:#8ee3ae!important}.tccc-employee-status.bad{background:#55252e;color:#ff98a4!important}.tccc-expand-employee{border:1px solid #564568;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 8px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-expand-employee:hover{border-color:#7b5ca5;background:#372a45}.tccc-employee-detail-row td{padding:0!important;background:#19151e!important}.tccc-employee-detail{padding:14px 16px 16px;border-left:3px solid #7654bd}.tccc-employee-detail-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:12px}.tccc-employee-detail-head strong{display:block;color:#f2edf6!important;font-size:14px}.tccc-employee-detail-head span{display:block;color:#a69dad!important;font-size:10px;margin-top:3px}.tccc-trend-note{color:#b4aabd!important;font-size:10px;line-height:1.45;text-align:right}.tccc-effectiveness-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.tccc-effectiveness-grid>div{background:#211b29;border:1px solid #3e3447;border-radius:8px;padding:9px 10px}.tccc-effectiveness-grid span{display:block;color:#a69dad!important;font-size:9px;text-transform:uppercase;letter-spacing:.5px;font-weight:800}.tccc-effectiveness-grid strong{display:block;color:#f1ebf5!important;font-size:14px;margin-top:4px}',
             '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}.tccc-dues-status{display:flex;gap:8px;flex-direction:column;border:1px solid #44394d;border-radius:10px;padding:12px 14px;margin-bottom:14px}.tccc-dues-status strong{font-size:12px!important}.tccc-dues-status span{font-size:11px!important;line-height:1.5;color:#b9b0c1!important}.tccc-dues-status.ready{background:#17251d;border-color:#315e46}.tccc-dues-status.ready strong{color:#8fe0ae!important}.tccc-dues-status.locked{background:#2a2023;border-color:#70404a}.tccc-dues-status.locked strong{color:#ff9aa7!important}.tccc-auto-reset{border:1px solid #604d70;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 7px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-auto-label{font-size:9px;color:#83d6a5!important;font-weight:900}.tccc-dues-actions{display:flex;gap:7px;align-items:center}.tccc-small-action.danger{border-color:#6f3a46!important;background:#3a2027!important;color:#ff9aa7!important}.tccc-small-action.danger:hover{border-color:#9a4e5e!important;background:#4b252f!important}.tccc-settings-divider{height:1px;background:#44394d;margin:20px 0}',
             '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number],.tccc-settings input[type=text]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
