@@ -107,10 +107,9 @@
     }
 
     function escapeRegExp(value) {
-        return String(value).replace(/[.*+?^$()|[\]\\{}]/g, '\\    function currentMonth() {
-        return new Date().toISOString().slice(0, 7);
-    }
-');
+        return String(value).replace(/[.*+?^$()|[\]\\{}]/g, function (match) {
+            return '\\' + match;
+        });
     }
 
     function messageMatchesDuesKeyword(message) {
