@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.1.0
+**Current version:** 0.1.1
 
 ## Install
 
@@ -81,6 +81,10 @@ Automatic eDVD receipt detection is planned after the exact live item/trade log 
 
 ### Local backup
 Settings (excluding the API key), financial snapshots, and eDVD records can be exported to JSON and imported later.
+
+## Interface notes
+
+The launcher currently appears across Torn so the dashboard remains accessible while traveling. A movable launcher and an option to limit it to company pages are planned after the core company-management features are validated.
 
 ## Current limitations
 
