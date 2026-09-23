@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.7.1
+// @version      0.8.0
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,10 +20,22 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.7.1',
+        version: '0.8.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
+    };
+
+    const COMPANY_ROLE_REQUIREMENTS = {
+        'Adult Novelties': {
+            'Sales Assistant': { manual_labor: 2000, intelligence: 0, endurance: 4000 },
+            'Sexpert': { manual_labor: 0, intelligence: 10000, endurance: 5000 },
+            'Store Manager': { manual_labor: 0, intelligence: 4000, endurance: 8000 },
+            'Marketing Manager': { manual_labor: 0, intelligence: 8000, endurance: 4000 },
+            'Receptionist': { manual_labor: 0, intelligence: 3000, endurance: 6000 },
+            'Human Resources': { manual_labor: 0, intelligence: 12000, endurance: 6000 },
+            'Cleaner': { manual_labor: 2000, intelligence: 0, endurance: 1000 }
+        }
     };
 
     const state = {
@@ -1598,11 +1610,12 @@
 
     function ensureStaffingTargets() {
         const counts = currentPositionCounts();
+        const positions = Array.from(new Set(Object.keys(counts).concat(knownCompanyRoles())));
         let changed = false;
 
-        Object.keys(counts).forEach(function (position) {
+        positions.forEach(function (position) {
             if (state.staffingTargets[position] === undefined) {
-                state.staffingTargets[position] = counts[position];
+                state.staffingTargets[position] = num(counts[position]);
                 changed = true;
             }
         });
@@ -1618,6 +1631,236 @@
         });
         saveStaffingTargets();
         render();
+    }
+
+    function companyRoleRequirements() {
+        const typeName = state.profile && state.profile.type ? state.profile.type.name : '';
+        return COMPANY_ROLE_REQUIREMENTS[typeName] || null;
+    }
+
+    function knownCompanyRoles() {
+        const requirements = companyRoleRequirements();
+        return requirements ? Object.keys(requirements) : [];
+    }
+
+    function effectivenessStatPart(stat, required, multiplier) {
+        required = num(required);
+        if (required <= 0) return 0;
+
+        const adjusted = Math.max(0, num(stat) * num(multiplier || 1));
+        const ratio = adjusted / required;
+        const base = Math.min(45, ratio * 45);
+        const bonus = ratio > 0 ? Math.max(0, 5 * (Math.log(ratio) / Math.log(2))) : 0;
+        return Math.floor(base + bonus);
+    }
+
+    function projectedWorkingStatsScore(employeeOrStats, role, multiplier) {
+        const requirements = companyRoleRequirements();
+        if (!requirements || !requirements[role]) return 0;
+
+        const stats = employeeOrStats && employeeOrStats.stats ? employeeOrStats.stats : (employeeOrStats || {});
+        const req = requirements[role];
+        return effectivenessStatPart(stats.manual_labor, req.manual_labor, multiplier) +
+            effectivenessStatPart(stats.intelligence, req.intelligence, multiplier) +
+            effectivenessStatPart(stats.endurance, req.endurance, multiplier);
+    }
+
+    function calibratedWorkStatMultiplier() {
+        const requirements = companyRoleRequirements();
+        if (!requirements) return 1;
+
+        const samples = state.employees.filter(function (employee) {
+            const role = employee.position && employee.position.name;
+            const observed = employee.effectiveness && employee.effectiveness.working_stats;
+            return role && requirements[role] && observed !== undefined && employee.stats;
+        });
+
+        if (!samples.length) return 1.2;
+
+        let bestMultiplier = 1.2;
+        let bestError = Infinity;
+
+        for (let step = 100; step <= 130; step += 1) {
+            const multiplier = step / 100;
+            let error = 0;
+
+            samples.forEach(function (employee) {
+                const role = employee.position.name;
+                const predicted = projectedWorkingStatsScore(employee, role, multiplier);
+                const observed = num(employee.effectiveness.working_stats);
+                error += Math.abs(predicted - observed);
+            });
+
+            if (error < bestError) {
+                bestError = error;
+                bestMultiplier = multiplier;
+            }
+        }
+
+        return bestMultiplier;
+    }
+
+    function individualBestRole(employee, roles, multiplier) {
+        let bestRole = '';
+        let bestScore = -Infinity;
+
+        roles.forEach(function (role) {
+            const score = projectedWorkingStatsScore(employee, role, multiplier);
+            if (score > bestScore) {
+                bestScore = score;
+                bestRole = role;
+            }
+        });
+
+        return { role: bestRole, score: bestScore };
+    }
+
+    function optimizeEmployeeAssignments(roles, targets, multiplier) {
+        const employees = state.employees.slice();
+        const counts = roles.map(function (role) { return Math.max(0, Math.floor(num(targets[role]))); });
+        const targetTotal = counts.reduce(function (sum, count) { return sum + count; }, 0);
+
+        if (targetTotal !== employees.length) {
+            return {
+                valid: false,
+                reason: 'Your staffing targets total ' + targetTotal + ', but you currently have ' + employees.length + ' employees.'
+            };
+        }
+
+        const memo = new Map();
+
+        function solve(index, remaining) {
+            if (index >= employees.length) {
+                return remaining.every(function (count) { return count === 0; }) ?
+                    { score: 0, assignments: [] } : null;
+            }
+
+            const key = index + '|' + remaining.join(',');
+            if (memo.has(key)) return memo.get(key);
+
+            let best = null;
+
+            for (let roleIndex = 0; roleIndex < roles.length; roleIndex += 1) {
+                if (remaining[roleIndex] <= 0) continue;
+
+                const nextRemaining = remaining.slice();
+                nextRemaining[roleIndex] -= 1;
+                const tail = solve(index + 1, nextRemaining);
+                if (!tail) continue;
+
+                const role = roles[roleIndex];
+                const score = projectedWorkingStatsScore(employees[index], role, multiplier);
+                const candidate = {
+                    score: score + tail.score,
+                    assignments: [{
+                        employeeId: String(employees[index].id),
+                        role: role,
+                        score: score
+                    }].concat(tail.assignments)
+                };
+
+                if (!best || candidate.score > best.score) best = candidate;
+            }
+
+            memo.set(key, best);
+            return best;
+        }
+
+        const result = solve(0, counts);
+        if (!result) return { valid: false, reason: 'No valid assignment could be produced from the current staffing targets.' };
+
+        const byEmployee = {};
+        result.assignments.forEach(function (assignment) {
+            byEmployee[assignment.employeeId] = assignment;
+        });
+
+        return {
+            valid: true,
+            totalScore: result.score,
+            byEmployee: byEmployee
+        };
+    }
+
+    function currentAssignmentScore(multiplier) {
+        return state.employees.reduce(function (total, employee) {
+            const role = employee.position && employee.position.name;
+            return total + projectedWorkingStatsScore(employee, role, multiplier);
+        }, 0);
+    }
+
+    function roleOptimizerHtml(targetPositions) {
+        const requirements = companyRoleRequirements();
+        if (!requirements) {
+            return '<section class="tccc-panel"><div class="tccc-note"><strong>Role optimizer:</strong> position requirements are not configured yet for this company type.</div></section>';
+        }
+
+        const roles = targetPositions.filter(function (role) {
+            return requirements[role] && num(state.staffingTargets[role]) > 0;
+        });
+        const multiplier = calibratedWorkStatMultiplier();
+        const optimized = optimizeEmployeeAssignments(roles, state.staffingTargets, multiplier);
+        const currentScore = currentAssignmentScore(multiplier);
+
+        let html = '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Role optimizer</h3><span>Maximizes projected working-stat effectiveness while preserving your saved staffing counts</span></div></div>';
+
+        if (!optimized.valid) {
+            html += '<div class="tccc-dues-status locked"><strong>Optimizer paused</strong><span>' + esc(optimized.reason) + ' Adjust the staffing plan so its total matches your employee count.</span></div></section>';
+            return html;
+        }
+
+        const gain = optimized.totalScore - currentScore;
+        const changes = state.employees.filter(function (employee) {
+            const optimizedRole = optimized.byEmployee[String(employee.id)];
+            const currentRole = employee.position && employee.position.name;
+            return optimizedRole && optimizedRole.role !== currentRole;
+        }).length;
+
+        html += '<div class="tccc-optimizer-summary">';
+        html += '<div><span>Current projected score</span><strong>' + esc(currentScore) + '</strong></div>';
+        html += '<div><span>Optimized projected score</span><strong class="' + (gain > 0 ? 'tccc-positive' : '') + '">' + esc(optimized.totalScore) + '</strong></div>';
+        html += '<div><span>Projected gain</span><strong class="' + (gain > 0 ? 'tccc-positive' : '') + '">' + esc((gain > 0 ? '+' : '') + gain) + '</strong></div>';
+        html += '<div><span>Position changes</span><strong>' + esc(changes) + '</strong></div>';
+        html += '<div><span>Stat multiplier calibration</span><strong>×' + esc(multiplier.toFixed(2)) + '</strong></div>';
+        html += '</div>';
+
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Employee</th><th>Current Role</th><th>Current Stat Score</th><th>Optimized Role</th><th>Optimized Score</th><th>Δ</th><th>Individual Best</th></tr></thead><tbody>';
+
+        state.employees
+            .slice()
+            .sort(function (a, b) {
+                const aAssignment = optimized.byEmployee[String(a.id)];
+                const bAssignment = optimized.byEmployee[String(b.id)];
+                const aChanged = aAssignment && aAssignment.role !== (a.position && a.position.name) ? 0 : 1;
+                const bChanged = bAssignment && bAssignment.role !== (b.position && b.position.name) ? 0 : 1;
+                if (aChanged !== bChanged) return aChanged - bChanged;
+                return String(a.name || '').localeCompare(String(b.name || ''));
+            })
+            .forEach(function (employee) {
+                const id = String(employee.id);
+                const currentRole = (employee.position && employee.position.name) || '';
+                const current = projectedWorkingStatsScore(employee, currentRole, multiplier);
+                const assignment = optimized.byEmployee[id];
+                const optimizedRole = assignment ? assignment.role : currentRole;
+                const optimizedScore = assignment ? assignment.score : current;
+                const delta = optimizedScore - current;
+                const best = individualBestRole(employee, roles, multiplier);
+                const changed = optimizedRole !== currentRole;
+
+                html += '<tr class="' + (changed ? 'tccc-optimizer-change-row' : '') + '"><td><a href="/profiles.php?XID=' +
+                    encodeURIComponent(employee.id) + '" target="_blank">' + esc(employee.name) + '</a></td>' +
+                    '<td>' + esc(currentRole) + '</td>' +
+                    '<td>' + esc(current) + '</td>' +
+                    '<td><strong class="' + (changed ? 'tccc-warning' : 'tccc-positive') + '">' + esc(optimizedRole) + '</strong></td>' +
+                    '<td>' + esc(optimizedScore) + '</td>' +
+                    '<td class="' + (delta > 0 ? 'tccc-positive' : (delta < 0 ? 'tccc-negative' : '')) + '">' +
+                    esc((delta > 0 ? '+' : '') + delta) + '</td>' +
+                    '<td>' + esc(best.role) + ' <small class="tccc-role-score">(' + esc(best.score) + ')</small></td></tr>';
+            });
+
+        html += '</tbody></table></div>';
+        html += '<div class="tccc-note"><strong>What the optimizer is doing:</strong> it calculates each employee\'s projected working-stat effectiveness for every role in your saved staffing plan, then solves the whole lineup together so one employee cannot occupy multiple “best” slots. The multiplier is calibrated against Torn\'s current Working Stats effectiveness values when available. Other modifiers such as addiction, inactivity, settled-in, merits, and management are shown elsewhere and are not treated as if they were raw work stats.</div>';
+        html += '</section>';
+        return html;
     }
 
     function recruitingHtml() {
@@ -1643,8 +1886,16 @@
         ensureStaffingTargets();
         const positionCounts = currentPositionCounts();
         const targetPositions = Array.from(new Set(
-            Object.keys(positionCounts).concat(Object.keys(state.staffingTargets || {}))
+            Object.keys(positionCounts)
+                .concat(Object.keys(state.staffingTargets || {}))
+                .concat(knownCompanyRoles())
         )).sort();
+
+        targetPositions.forEach(function (position) {
+            if (state.staffingTargets[position] === undefined) {
+                state.staffingTargets[position] = num(positionCounts[position]);
+            }
+        });
         const targetSummary = targetPositions.reduce(function (summary, position) {
             const current = num(positionCounts[position]);
             const target = num(state.staffingTargets[position]);
@@ -1722,6 +1973,8 @@
         html += '<span class="' + (targetSummary.over ? 'tccc-warning' : 'tccc-positive') + '">' + esc(targetSummary.over) + ' over</span>';
         html += '<span>' + esc(targetSummary.onTarget) + ' position' + (targetSummary.onTarget === 1 ? '' : 's') + ' on target</span>';
         html += '</div></section>';
+
+        html += roleOptimizerHtml(targetPositions);
 
         html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Applicants</h3><span>Sorted by expiration first so nothing quietly disappears</span></div></div>';
 
@@ -2117,13 +2370,13 @@
             '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}.tccc-fund-badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:9px!important;font-weight:900!important;letter-spacing:.5px}.tccc-fund-badge.deposit{background:#1f4b34;color:#8fe0ae!important}.tccc-fund-badge.withdrawal{background:#582630;color:#ff9aa7!important}.tccc-fund-badge.other{background:#3a3341;color:#c4bbc9!important}.tccc-cash-equation{display:grid;grid-template-columns:minmax(150px,1fr) auto minmax(130px,1fr) auto minmax(130px,1fr) auto minmax(170px,1.2fr);gap:10px;align-items:stretch}.tccc-cash-equation>div{display:flex;flex-direction:column;justify-content:center;gap:5px;background:#19151e;border:1px solid #403649;border-radius:9px;padding:12px}.tccc-cash-equation>div.result{border-color:#7654bd;background:rgba(118,84,189,.08)}.tccc-cash-equation>div span{font-size:10px;color:#aaa2b3!important;text-transform:uppercase;font-weight:800;letter-spacing:.5px}.tccc-cash-equation>div strong{font-size:16px;color:#f4f0f8!important}.tccc-cash-equation>b{display:flex;align-items:center;color:#a58fbe!important;font-size:19px}',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
             '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}.tccc-training-next small{display:block;margin-top:7px;color:#c0b4cc!important;font-size:11px}.tccc-next-meta{text-align:right}.tccc-next-meta strong{font-size:20px!important}.tccc-training-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.tccc-training-summary>div{background:#211b29;border:1px solid #43384d;border-radius:10px;padding:12px 13px}.tccc-training-summary span{display:block;color:#aaa1b2!important;font-size:9px;text-transform:uppercase;letter-spacing:.65px;font-weight:800}.tccc-training-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:5px}.tccc-training-head{align-items:flex-start}.tccc-training-head>div span{display:block;margin-top:4px}.tccc-small-action{border:1px solid #564568;background:#2b2334;color:#e8dff0!important;border-radius:8px;padding:8px 10px;font-size:10px!important;font-weight:800!important;cursor:pointer;white-space:nowrap}.tccc-small-action:hover{border-color:#7c5fb0;background:#33273f}.tccc-queue-actions{display:flex;gap:5px;align-items:center}.tccc-queue-actions button{border:1px solid #4b4054;background:#241e2b;color:#d9d1df!important;border-radius:6px;min-width:30px;height:28px;padding:0 7px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-queue-actions button:hover:not(:disabled){background:#3b2a50;border-color:#7654bd;color:#fff!important}.tccc-queue-actions button:disabled{opacity:.28;cursor:not-allowed}.tccc-queue-actions button[data-train-action="next"]{color:#c6a9ff!important}.tccc-queue-actions button[data-train-action="skip"]{color:#f2bf7b!important}.tccc-training-log{display:flex;flex-direction:column;gap:7px}.tccc-training-log-row{display:grid;grid-template-columns:90px minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #39313f;border-radius:8px;background:#1a161f}.tccc-training-log-row>div{min-width:0}.tccc-training-log-row strong{display:block;color:#eee8f4!important;font-size:12px}.tccc-training-log-row>div span{display:block;color:#aaa2b2!important;font-size:10px;margin-top:2px}.tccc-training-log-row time{color:#918999!important;font-size:10px;white-space:nowrap}.tccc-rotation-badge{display:inline-block;text-align:center;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-rotation-badge.auto{background:#1f4b34;color:#8fe0ae!important}.tccc-rotation-badge.skip{background:#5a4021;color:#f5c781!important}.tccc-rotation-badge.reset{background:#3b304a;color:#cbb6e7!important}.tccc-training-log-empty{color:#aaa2b2!important;font-size:11px;padding:8px 2px}',
-            '.tccc-position-mix{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-position-mix>div,.tccc-recruit-status>div{display:flex;justify-content:space-between;align-items:center;background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px 11px}.tccc-position-mix span,.tccc-recruit-status span{color:#aaa2b3!important;font-size:10px;font-weight:700}.tccc-position-plan{position:relative;padding-right:72px!important}.tccc-position-plan small{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:8px!important;font-weight:900!important;text-transform:uppercase}.tccc-position-plan.target small{color:#8ee3ae!important}.tccc-position-plan.short small{color:#ff98a4!important}.tccc-position-plan.over small{color:#f5c781!important}.tccc-staffing-editor{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.tccc-staffing-editor label{display:flex;flex-direction:column;gap:6px;background:#19151e;border:1px solid #3e3447;border-radius:9px;padding:10px}.tccc-staffing-editor label span{color:#b7aec0!important;font-size:10px;font-weight:800}.tccc-staffing-editor input{background:#121016!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:7px;padding:8px 9px;font-size:13px!important}.tccc-staffing-plan-summary{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;color:#aaa2b2!important;font-size:10px;font-weight:800}.tccc-position-mix strong,.tccc-recruit-status strong{color:#f3edf7!important;font-size:14px}.tccc-recruit-status{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-recruit-empty{display:flex;flex-direction:column;gap:5px;text-align:center;padding:36px 16px;background:#1a161f;border:1px dashed #493d53;border-radius:10px}.tccc-recruit-empty strong{color:#f1ecf5!important;font-size:14px}.tccc-recruit-empty span{color:#aaa1b2!important;font-size:11px}.tccc-application-message{white-space:normal!important;min-width:220px;max-width:420px}',
+            '.tccc-position-mix{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-position-mix>div,.tccc-recruit-status>div{display:flex;justify-content:space-between;align-items:center;background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px 11px}.tccc-position-mix span,.tccc-recruit-status span{color:#aaa2b3!important;font-size:10px;font-weight:700}.tccc-position-plan{position:relative;padding-right:72px!important}.tccc-position-plan small{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:8px!important;font-weight:900!important;text-transform:uppercase}.tccc-position-plan.target small{color:#8ee3ae!important}.tccc-position-plan.short small{color:#ff98a4!important}.tccc-position-plan.over small{color:#f5c781!important}.tccc-staffing-editor{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.tccc-staffing-editor label{display:flex;flex-direction:column;gap:6px;background:#19151e;border:1px solid #3e3447;border-radius:9px;padding:10px}.tccc-staffing-editor label span{color:#b7aec0!important;font-size:10px;font-weight:800}.tccc-staffing-editor input{background:#121016!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:7px;padding:8px 9px;font-size:13px!important}.tccc-staffing-plan-summary{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;color:#aaa2b2!important;font-size:10px;font-weight:800}.tccc-optimizer-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0 0 13px}.tccc-optimizer-summary>div{background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px}.tccc-optimizer-summary span{display:block;color:#aaa2b3!important;font-size:9px;text-transform:uppercase;letter-spacing:.45px;font-weight:800}.tccc-optimizer-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:4px}.tccc-optimizer-change-row td{background:rgba(245,199,129,.035)!important}.tccc-role-score{color:#8f8798!important;font-size:9px!important}.tccc-position-mix strong,.tccc-recruit-status strong{color:#f3edf7!important;font-size:14px}.tccc-recruit-status{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-recruit-empty{display:flex;flex-direction:column;gap:5px;text-align:center;padding:36px 16px;background:#1a161f;border:1px dashed #493d53;border-radius:10px}.tccc-recruit-empty strong{color:#f1ecf5!important;font-size:14px}.tccc-recruit-empty span{color:#aaa1b2!important;font-size:11px}.tccc-application-message{white-space:normal!important;min-width:220px;max-width:420px}',
             '.tccc-stock-status{display:inline-block;border-radius:999px;padding:5px 8px;font-size:9px!important;font-weight:900!important}.tccc-stock-status.good{background:#204b34;color:#8ee3ae!important}.tccc-stock-status.watch{background:#59421f;color:#f5c781!important}.tccc-stock-status.bad{background:#55252e;color:#ff98a4!important}.tccc-stock-status.neutral{background:#3a3341;color:#c4bbc9!important}.tccc-stock-sample{color:#8f8798!important;font-size:9px!important}.tccc-modal .tccc-warning,.tccc-modal td.tccc-warning{color:#f5c781!important;font-weight:800!important}',
             '.tccc-filterbar{display:flex;gap:7px;flex-wrap:wrap;margin:4px 0 12px}.tccc-filterbar button{border:1px solid #4c4056;background:#1c1722;color:#bfb6c7!important;border-radius:999px;padding:7px 10px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-filterbar button.active{background:#7449c8;border-color:#865ee0;color:#fff!important}.tccc-employee-status{display:inline-block;border-radius:999px;padding:5px 8px;font-size:9px!important;font-weight:900!important}.tccc-employee-status.good{background:#204b34;color:#8ee3ae!important}.tccc-employee-status.bad{background:#55252e;color:#ff98a4!important}.tccc-expand-employee{border:1px solid #564568;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 8px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-expand-employee:hover{border-color:#7b5ca5;background:#372a45}.tccc-employee-detail-row td{padding:0!important;background:#19151e!important}.tccc-employee-detail{padding:14px 16px 16px;border-left:3px solid #7654bd}.tccc-employee-detail-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:12px}.tccc-employee-detail-head strong{display:block;color:#f2edf6!important;font-size:14px}.tccc-employee-detail-head span{display:block;color:#a69dad!important;font-size:10px;margin-top:3px}.tccc-trend-note{color:#b4aabd!important;font-size:10px;line-height:1.45;text-align:right}.tccc-effectiveness-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.tccc-effectiveness-grid>div{background:#211b29;border:1px solid #3e3447;border-radius:8px;padding:9px 10px}.tccc-effectiveness-grid span{display:block;color:#a69dad!important;font-size:9px;text-transform:uppercase;letter-spacing:.5px;font-weight:800}.tccc-effectiveness-grid strong{display:block;color:#f1ebf5!important;font-size:14px;margin-top:4px}',
             '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}.tccc-dues-status{display:flex;gap:8px;flex-direction:column;border:1px solid #44394d;border-radius:10px;padding:12px 14px;margin-bottom:14px}.tccc-dues-status strong{font-size:12px!important}.tccc-dues-status span{font-size:11px!important;line-height:1.5;color:#b9b0c1!important}.tccc-dues-status.ready{background:#17251d;border-color:#315e46}.tccc-dues-status.ready strong{color:#8fe0ae!important}.tccc-dues-status.locked{background:#2a2023;border-color:#70404a}.tccc-dues-status.locked strong{color:#ff9aa7!important}.tccc-auto-reset{border:1px solid #604d70;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 7px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-auto-label{font-size:9px;color:#83d6a5!important;font-weight:900}.tccc-dues-actions{display:flex;gap:7px;align-items:center}.tccc-small-action.danger{border-color:#6f3a46!important;background:#3a2027!important;color:#ff9aa7!important}.tccc-small-action.danger:hover{border-color:#9a4e5e!important;background:#4b252f!important}.tccc-settings-divider{height:1px;background:#44394d;margin:20px 0}',
             '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number],.tccc-settings input[type=text]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
             '.tccc-empty{text-align:center;padding:70px 20px;color:#eee8f4}.tccc-empty p{color:#b3aabb!important;max-width:560px;margin:12px auto 18px;line-height:1.55}',
-            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-effectiveness-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-employee-detail-head{flex-direction:column}.tccc-trend-note{text-align:left}.tccc-position-mix,.tccc-recruit-status{grid-template-columns:1fr}.tccc-staffing-editor{grid-template-columns:1fr}.tccc-modal main{padding:10px}}',
+            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-effectiveness-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-employee-detail-head{flex-direction:column}.tccc-trend-note{text-align:left}.tccc-position-mix,.tccc-recruit-status{grid-template-columns:1fr}.tccc-staffing-editor{grid-template-columns:1fr}.tccc-optimizer-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-modal main{padding:10px}}',
             '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
         ].join('\n');
         document.head.appendChild(style);
