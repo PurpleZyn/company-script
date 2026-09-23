@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.2 - 2026-09-23
+
+Automatic refresh and TCT history capture.
+
+### Added
+- Automatic company-data refresh while Torn is open.
+- Configurable refresh interval from 15 to 120 minutes (default: 30).
+- Refresh when returning to Torn after roughly 10 minutes away.
+- Near-end-of-day snapshot around 23:55 TCT when Torn is open.
+- Immediate refresh when a new TCT day is detected.
+- Automatic background startup refresh when a saved API key is available.
+- Footer status showing whether auto-refresh is enabled, its interval, and how recently data refreshed.
+- Settings controls to enable/disable automatic refresh and change the interval.
+
+### Behavior
+Auto-refresh runs only while Torn is open in a browser/app environment where the userscript is active. It cannot wake a closed browser or run while Torn is completely closed. The 23:55 TCT capture is designed to make completed-day history substantially more representative when Torn remains open near reset.
+
 ## 0.9.1 - 2026-09-23
 
 Completed-day analytics correction.
