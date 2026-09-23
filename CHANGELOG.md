@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.0 - 2026-09-23
+
+First complete local-first release.
+
+### Added
+- Draggable COMPANY CC launcher with remembered on-screen position.
+- Settings option to show the launcher everywhere in Torn or only in the company area.
+- Launcher attention badge showing the number of management categories that currently need attention.
+- Fresh/stale data indicator in the dashboard header.
+- Optional in-app alerts for:
+  - training queue advancement,
+  - automatic eDVD dues detection,
+  - new company applications,
+  - items newly entering LOW stock status,
+  - role-optimizer recommendation changes.
+- Alert baselines persist locally so the first v1.0 refresh does not spam existing events.
+- Reset-launcher-position control.
+- Launcher/freshness state updates cleanly across Torn SPA navigation.
+
+### Polished
+- Finalized the Director Brief as the primary at-a-glance action center.
+- Preserved automatic background refresh even when the launcher is hidden outside company pages.
+- Included alert baseline state in local backup/import.
+- Updated metadata and UI status for the v1.0 release.
+
+### v1 scope
+v1.0 is the completed **local-first userscript** architecture. It intentionally does not require hosting or a backend. A future v2 can add always-on remote collection/sync if long-term usage shows that local history is not sufficient.
+
 ## 0.9.2 - 2026-09-23
 
 Automatic refresh and TCT history capture.
