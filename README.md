@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.5.1
+**Current version:** 0.6.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.5.0 does
+## What v0.6.0 does
 
 ### Overview
 - Current Torn-reported daily company revenue
@@ -83,12 +83,15 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Stored locally between sessions
 
 ### Stock
-- In-stock amount
-- Stock on order
-- Current amount sold
-- Sales value
-- Estimated cost of goods sold
-- Rough days-of-stock coverage warning
+- In-stock amount and stock already on order
+- Current daily units sold and sales value
+- Daily per-item history retained for up to 90 days
+- Average daily sales pace using up to seven completed TCT days
+- Projected on-hand and total stock coverage
+- Projected run-out date
+- LOW / WATCH / HEALTHY / NO SALES status
+- Configurable stock target and warning thresholds
+- Suggested reorder quantity to reach the target coverage
 
 ### Local backup
 Settings (excluding the API key), financial snapshots, and eDVD records can be exported to JSON and imported later.
