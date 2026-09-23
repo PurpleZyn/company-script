@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.7.1
+**Current version:** 0.8.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.7.0 does
+## What v0.8.0 does
 
 ### Overview
 - Current Torn-reported daily company revenue
@@ -86,6 +86,9 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Live hired/capacity and open-seat count
 - Current staffing mix by position
 - Configurable ideal headcount by position with short/on-target/over comparisons
+- Whole-company role optimizer that preserves those target slot counts
+- Per-employee optimized role and projected working-stat effectiveness
+- Applicant best-planned-role and projected role-fit score
 - Company application-open/closed status
 - Applicant level and all three working stats
 - Total work-stat display
