@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.2.1
+// @version      0.3.0
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.2.1',
+        version: '0.3.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -38,6 +38,13 @@
         fundNews: [],
         snapshots: {},
         dues: {},
+        trainingRotation: {
+            initialized: false,
+            order: [],
+            lastSeen: {},
+            history: [],
+            updatedAt: 0
+        },
         settings: {
             apiKey: '',
             edvdQty: 1,
@@ -129,6 +136,10 @@
         state.settings = Object.assign({}, state.settings, savedSettings || {});
         state.snapshots = store.get('snapshots', {}) || {};
         state.dues = store.get('dues', {}) || {};
+        state.trainingRotation = Object.assign({}, state.trainingRotation, store.get('trainingRotation', {}) || {});
+        if (!Array.isArray(state.trainingRotation.order)) state.trainingRotation.order = [];
+        if (!state.trainingRotation.lastSeen || typeof state.trainingRotation.lastSeen !== 'object') state.trainingRotation.lastSeen = {};
+        if (!Array.isArray(state.trainingRotation.history)) state.trainingRotation.history = [];
     }
 
     function saveSettings() {
@@ -141,6 +152,11 @@
 
     function saveDues() {
         store.set('dues', state.dues);
+    }
+
+    function saveTrainingRotation() {
+        state.trainingRotation.updatedAt = Math.floor(Date.now() / 1000);
+        store.set('trainingRotation', state.trainingRotation);
     }
 
     function apiGet(path, params) {
@@ -193,6 +209,36 @@
             });
     }
 
+    function trainingEntryEmployeeIds(entry) {
+        const ids = [];
+        const raw = String((entry && entry.text) || '');
+        const employeeIds = new Set(state.employees.map(function (employee) { return String(employee.id); }));
+
+        const xidRegex = /XID=(\d+)/gi;
+        let match;
+        while ((match = xidRegex.exec(raw)) !== null) {
+            if (employeeIds.has(String(match[1])) && ids.indexOf(String(match[1])) === -1) {
+                ids.push(String(match[1]));
+            }
+        }
+
+        if (ids.length) return ids;
+
+        const holder = document.createElement('div');
+        holder.innerHTML = raw;
+        const plain = (' ' + (holder.textContent || '') + ' ').toLowerCase();
+
+        state.employees.forEach(function (employee) {
+            const name = String(employee.name || '').trim().toLowerCase();
+            if (!name) return;
+            if (plain.indexOf(name) !== -1 && ids.indexOf(String(employee.id)) === -1) {
+                ids.push(String(employee.id));
+            }
+        });
+
+        return ids;
+    }
+
     function calculateTrainingMap() {
         const map = {};
         state.employees.forEach(function (employee) {
@@ -200,20 +246,194 @@
         });
 
         state.trainingNews.forEach(function (entry) {
-            const holder = document.createElement('div');
-            holder.innerHTML = entry.text || '';
-            const plain = (holder.textContent || '').toLowerCase();
-
-            state.employees.forEach(function (employee) {
-                const name = String(employee.name || '').toLowerCase();
-                if (!name || plain.indexOf(name) === -1) return;
-                const record = map[String(employee.id)];
-                record.count += 1;
-                record.last = Math.max(record.last, num(entry.timestamp));
+            const ids = trainingEntryEmployeeIds(entry);
+            ids.forEach(function (id) {
+                if (!map[id]) return;
+                map[id].count += 1;
+                map[id].last = Math.max(map[id].last, num(entry.timestamp));
             });
         });
 
         return map;
+    }
+
+    function activeTrainingEmployees() {
+        return state.employees.filter(function (employee) {
+            return !isDirector(employee);
+        });
+    }
+
+    function trainingEmployeeById(id) {
+        return activeTrainingEmployees().find(function (employee) {
+            return String(employee.id) === String(id);
+        }) || null;
+    }
+
+    function normalizeRotationOrder() {
+        const active = activeTrainingEmployees();
+        const activeIds = active.map(function (employee) { return String(employee.id); });
+        const activeSet = new Set(activeIds);
+        const seen = new Set();
+
+        state.trainingRotation.order = (state.trainingRotation.order || []).filter(function (id) {
+            const key = String(id);
+            if (!activeSet.has(key) || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        }).map(String);
+
+        activeIds.forEach(function (id) {
+            if (!seen.has(id)) {
+                state.trainingRotation.order.push(id);
+                seen.add(id);
+            }
+        });
+
+        Object.keys(state.trainingRotation.lastSeen || {}).forEach(function (id) {
+            if (!activeSet.has(String(id))) delete state.trainingRotation.lastSeen[id];
+        });
+    }
+
+    function seedTrainingRotation() {
+        const map = calculateTrainingMap();
+        const employees = activeTrainingEmployees().slice().sort(function (a, b) {
+            const aLast = num(map[String(a.id)] && map[String(a.id)].last);
+            const bLast = num(map[String(b.id)] && map[String(b.id)].last);
+            if (aLast !== bLast) return aLast - bLast;
+            return String(a.name || '').localeCompare(String(b.name || ''));
+        });
+
+        state.trainingRotation.order = employees.map(function (employee) { return String(employee.id); });
+        state.trainingRotation.lastSeen = {};
+
+        employees.forEach(function (employee) {
+            state.trainingRotation.lastSeen[String(employee.id)] =
+                num(map[String(employee.id)] && map[String(employee.id)].last);
+        });
+
+        state.trainingRotation.initialized = true;
+        saveTrainingRotation();
+    }
+
+    function syncTrainingRotation() {
+        if (!state.employees.length) return;
+
+        const map = calculateTrainingMap();
+
+        if (!state.trainingRotation.initialized || !state.trainingRotation.order.length) {
+            seedTrainingRotation();
+            return;
+        }
+
+        normalizeRotationOrder();
+
+        const detected = [];
+        activeTrainingEmployees().forEach(function (employee) {
+            const id = String(employee.id);
+            const latest = num(map[id] && map[id].last);
+            const previous = num(state.trainingRotation.lastSeen[id]);
+
+            if (latest > previous && previous > 0) {
+                detected.push({ id: id, timestamp: latest });
+            }
+
+            if (latest > previous) state.trainingRotation.lastSeen[id] = latest;
+            if (state.trainingRotation.lastSeen[id] === undefined) state.trainingRotation.lastSeen[id] = latest;
+        });
+
+        detected.sort(function (a, b) {
+            if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+            return state.trainingRotation.order.indexOf(a.id) - state.trainingRotation.order.indexOf(b.id);
+        });
+
+        detected.forEach(function (event) {
+            const index = state.trainingRotation.order.indexOf(event.id);
+            if (index >= 0) state.trainingRotation.order.splice(index, 1);
+            state.trainingRotation.order.push(event.id);
+
+            const employee = trainingEmployeeById(event.id);
+            state.trainingRotation.history.unshift({
+                id: event.id,
+                name: employee ? employee.name : event.id,
+                timestamp: event.timestamp,
+                detectedAt: Math.floor(Date.now() / 1000),
+                type: 'auto'
+            });
+        });
+
+        state.trainingRotation.history = state.trainingRotation.history.slice(0, 50);
+        saveTrainingRotation();
+    }
+
+    function trainingQueue() {
+        normalizeRotationOrder();
+        return state.trainingRotation.order.map(function (id) {
+            return trainingEmployeeById(id);
+        }).filter(Boolean);
+    }
+
+    function moveTrainingEmployee(id, direction) {
+        const key = String(id);
+        normalizeRotationOrder();
+        const order = state.trainingRotation.order;
+        const index = order.indexOf(key);
+        if (index < 0) return;
+
+        let target = index;
+        if (direction === 'up') target = Math.max(0, index - 1);
+        if (direction === 'down') target = Math.min(order.length - 1, index + 1);
+        if (target === index) return;
+
+        order.splice(index, 1);
+        order.splice(target, 0, key);
+        saveTrainingRotation();
+        render();
+    }
+
+    function setTrainingNext(id) {
+        const key = String(id);
+        normalizeRotationOrder();
+        const index = state.trainingRotation.order.indexOf(key);
+        if (index < 0) return;
+        state.trainingRotation.order.splice(index, 1);
+        state.trainingRotation.order.unshift(key);
+        saveTrainingRotation();
+        render();
+    }
+
+    function skipTrainingEmployee(id) {
+        const key = String(id);
+        normalizeRotationOrder();
+        const index = state.trainingRotation.order.indexOf(key);
+        if (index < 0) return;
+        state.trainingRotation.order.splice(index, 1);
+        state.trainingRotation.order.push(key);
+
+        const employee = trainingEmployeeById(key);
+        state.trainingRotation.history.unshift({
+            id: key,
+            name: employee ? employee.name : key,
+            timestamp: Math.floor(Date.now() / 1000),
+            detectedAt: Math.floor(Date.now() / 1000),
+            type: 'skip'
+        });
+        state.trainingRotation.history = state.trainingRotation.history.slice(0, 50);
+        saveTrainingRotation();
+        render();
+    }
+
+    function resetTrainingRotation() {
+        seedTrainingRotation();
+        state.trainingRotation.history.unshift({
+            id: '',
+            name: 'Rotation reset from training history',
+            timestamp: Math.floor(Date.now() / 1000),
+            detectedAt: Math.floor(Date.now() / 1000),
+            type: 'reset'
+        });
+        state.trainingRotation.history = state.trainingRotation.history.slice(0, 50);
+        saveTrainingRotation();
+        render();
     }
 
     function financeSummary() {
@@ -391,6 +611,7 @@
             state.stock = Array.isArray(results[2].stock) ? results[2].stock : [];
             state.trainingNews = Array.isArray(results[3].news) ? results[3].news : [];
             state.fundNews = Array.isArray(results[4].news) ? results[4].news : [];
+            syncTrainingRotation();
             saveTodaySnapshot();
         } catch (e) {
             state.error = e && e.message ? e.message : String(e);
@@ -447,15 +668,7 @@
         if (!state.profile) return emptyConnectHtml();
 
         const f = financeSummary();
-        const training = calculateTrainingMap();
-        const rotation = state.employees
-            .filter(function (e) { return !isDirector(e); })
-            .slice()
-            .sort(function (a, b) {
-                return num(training[String(a.id)] && training[String(a.id)].last) -
-                    num(training[String(b.id)] && training[String(b.id)].last);
-            });
-
+        const rotation = trainingQueue();
         const next = rotation[0];
         const ledger = monthLedger(currentMonth());
         const dueList = duesEmployees();
@@ -704,30 +917,61 @@
         if (!state.profile) return emptyConnectHtml();
 
         const map = calculateTrainingMap();
-        const rows = state.employees
-            .filter(function (e) { return !isDirector(e); })
-            .map(function (e) {
-                return { employee: e, training: map[String(e.id)] || { last: 0, count: 0 } };
-            })
-            .sort(function (a, b) { return num(a.training.last) - num(b.training.last); });
+        const queue = trainingQueue();
+        const next = queue[0] || null;
+        const lastAuto = state.trainingRotation.history.find(function (event) { return event.type === 'auto'; });
 
         let html = '';
-        if (rows[0]) {
-            html += '<div class="tccc-next"><div><span>Next in rotation</span><strong>' + esc(rows[0].employee.name) + '</strong></div>' +
-                '<div>' + esc(formatAge(rows[0].training.last)) + '</div></div>';
+
+        if (next) {
+            const record = map[String(next.id)] || { last: 0, count: 0 };
+            html += '<div class="tccc-next tccc-training-next"><div><span>Next in rotation</span><strong>' +
+                esc(next.name) + '</strong><small>Last detected train: ' + esc(formatDate(record.last)) +
+                ' · ' + esc(formatAge(record.last)) + '</small></div><div class="tccc-next-meta"><span>Queue position</span><strong>#1</strong></div></div>';
         }
 
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Training rotation</h3><span>Built from the latest 100 company training-news entries</span></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>#</th><th>Employee</th><th>Last detected train</th><th>Age</th><th>Recent trains</th></tr></thead><tbody>';
+        html += '<div class="tccc-training-summary">';
+        html += '<div><span>Employees in queue</span><strong>' + esc(queue.length) + '</strong></div>';
+        html += '<div><span>Available trains</span><strong>' + esc(num(state.profile.trains)) + '</strong></div>';
+        html += '<div><span>Last auto-advance</span><strong>' + esc(lastAuto ? formatAge(lastAuto.timestamp) : 'None yet') + '</strong></div>';
+        html += '<div><span>Rotation mode</span><strong>Persistent queue</strong></div>';
+        html += '</div>';
 
-        rows.forEach(function (row, index) {
-            html += '<tr' + (index === 0 ? ' class="tccc-nextrow"' : '') + '><td>' + (index + 1) + '</td><td>' +
-                esc(row.employee.name) + '</td><td>' + esc(formatDate(row.training.last)) + '</td><td>' +
-                esc(formatAge(row.training.last)) + '</td><td>' + esc(row.training.count) + '</td></tr>';
+        html += '<section class="tccc-panel"><div class="tccc-panel-head tccc-training-head"><div><h3>Training queue</h3><span>When Torn detects a new train, that employee automatically moves to the back</span></div><button id="tccc-reset-training" class="tccc-small-action">Reset from history</button></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>#</th><th>Employee</th><th>Last detected train</th><th>Age</th><th>Recent trains</th><th>Queue controls</th></tr></thead><tbody>';
+
+        queue.forEach(function (employee, index) {
+            const record = map[String(employee.id)] || { last: 0, count: 0 };
+            html += '<tr class="' + (index === 0 ? 'tccc-nextrow' : '') + '"><td><strong>' + (index + 1) + '</strong></td><td><strong>' +
+                esc(employee.name) + '</strong></td><td>' + esc(formatDate(record.last)) + '</td><td>' +
+                esc(formatAge(record.last)) + '</td><td>' + esc(record.count) + '</td><td><div class="tccc-queue-actions">' +
+                '<button data-train-action="next" data-train-id="' + esc(employee.id) + '" title="Make next">NEXT</button>' +
+                '<button data-train-action="up" data-train-id="' + esc(employee.id) + '" title="Move up" ' + (index === 0 ? 'disabled' : '') + '>↑</button>' +
+                '<button data-train-action="down" data-train-id="' + esc(employee.id) + '" title="Move down" ' + (index === queue.length - 1 ? 'disabled' : '') + '>↓</button>' +
+                '<button data-train-action="skip" data-train-id="' + esc(employee.id) + '" title="Skip this turn and send to back">SKIP</button>' +
+                '</div></td></tr>';
         });
 
         html += '</tbody></table></div></section>';
-        html += '<div class="tccc-note">Employees with no match in the recent training-news window rise to the top. We can add cycle locks, skips and custom priorities next.</div>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Rotation activity</h3><span>Automatic advances and manual skips</span></div>';
+        html += '<div class="tccc-training-log">';
+        if (!state.trainingRotation.history.length) {
+            html += '<div class="tccc-training-log-empty">No rotation activity recorded yet. The queue was seeded from the current Torn training history.</div>';
+        } else {
+            state.trainingRotation.history.slice(0, 10).forEach(function (event) {
+                const badge = event.type === 'auto' ? 'AUTO TRAIN' : event.type === 'skip' ? 'SKIP' : 'RESET';
+                const detail = event.type === 'auto' ? 'Detected a Torn train and moved to the back of the queue' :
+                    event.type === 'skip' ? 'Manually skipped and moved to the back of the queue' :
+                    'Queue rebuilt from latest training history';
+                html += '<div class="tccc-training-log-row"><span class="tccc-rotation-badge ' + esc(event.type) + '">' +
+                    esc(badge) + '</span><div><strong>' + esc(event.name || 'Rotation') + '</strong><span>' +
+                    esc(detail) + '</span></div><time>' + esc(formatDate(event.timestamp)) + '</time></div>';
+            });
+        }
+        html += '</div></section>';
+
+        html += '<div class="tccc-note"><strong>How this works:</strong> On the first run, the queue is seeded oldest-trained first. After that it is persistent. When Torn reports a new train for an employee, the script moves that employee to the back automatically. NEXT, ↑, ↓, and SKIP let you override the order without changing Torn itself. “Reset from history” rebuilds the queue from the current training timestamps if the order ever gets out of sync.</div>';
         return html;
     }
 
@@ -876,6 +1120,20 @@
             });
         });
 
+        document.querySelectorAll('[data-train-action]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                const action = button.getAttribute('data-train-action');
+                const id = button.getAttribute('data-train-id');
+                if (action === 'next') setTrainingNext(id);
+                if (action === 'up') moveTrainingEmployee(id, 'up');
+                if (action === 'down') moveTrainingEmployee(id, 'down');
+                if (action === 'skip') skipTrainingEmployee(id);
+            });
+        });
+
+        const resetTraining = document.getElementById('tccc-reset-training');
+        if (resetTraining) resetTraining.addEventListener('click', resetTrainingRotation);
+
         const save = document.getElementById('tccc-save-settings');
         if (save) save.addEventListener('click', function () {
             state.settings.apiKey = (document.getElementById('tccc-api-key').value || '').trim();
@@ -903,7 +1161,8 @@
             exportedAt: new Date().toISOString(),
             settings: Object.assign({}, state.settings, { apiKey: '' }),
             snapshots: state.snapshots,
-            dues: state.dues
+            dues: state.dues,
+            trainingRotation: state.trainingRotation
         };
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
         const link = document.createElement('a');
@@ -924,12 +1183,14 @@
                 const payload = JSON.parse(reader.result);
                 if (payload.snapshots) state.snapshots = payload.snapshots;
                 if (payload.dues) state.dues = payload.dues;
+                if (payload.trainingRotation) state.trainingRotation = Object.assign({}, state.trainingRotation, payload.trainingRotation);
                 if (payload.settings) {
                     const currentKey = state.settings.apiKey;
                     state.settings = Object.assign({}, state.settings, payload.settings, { apiKey: currentKey });
                 }
                 saveSnapshots();
                 saveDues();
+                saveTrainingRotation();
                 saveSettings();
                 state.error = '';
                 render();
@@ -973,11 +1234,11 @@
             '.tccc-note{font-size:11px;line-height:1.55;color:#b2aaba!important;padding:11px 13px;border-left:3px solid #7654bd;background:#19151e;border-radius:6px}.tccc-note strong{color:#e8dfff!important}',
             '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}.tccc-fund-badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:9px!important;font-weight:900!important;letter-spacing:.5px}.tccc-fund-badge.deposit{background:#1f4b34;color:#8fe0ae!important}.tccc-fund-badge.withdrawal{background:#582630;color:#ff9aa7!important}.tccc-fund-badge.other{background:#3a3341;color:#c4bbc9!important}.tccc-cash-equation{display:grid;grid-template-columns:minmax(150px,1fr) auto minmax(130px,1fr) auto minmax(130px,1fr) auto minmax(170px,1.2fr);gap:10px;align-items:stretch}.tccc-cash-equation>div{display:flex;flex-direction:column;justify-content:center;gap:5px;background:#19151e;border:1px solid #403649;border-radius:9px;padding:12px}.tccc-cash-equation>div.result{border-color:#7654bd;background:rgba(118,84,189,.08)}.tccc-cash-equation>div span{font-size:10px;color:#aaa2b3!important;text-transform:uppercase;font-weight:800;letter-spacing:.5px}.tccc-cash-equation>div strong{font-size:16px;color:#f4f0f8!important}.tccc-cash-equation>b{display:flex;align-items:center;color:#a58fbe!important;font-size:19px}',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
-            '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}',
+            '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}.tccc-training-next small{display:block;margin-top:7px;color:#c0b4cc!important;font-size:11px}.tccc-next-meta{text-align:right}.tccc-next-meta strong{font-size:20px!important}.tccc-training-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.tccc-training-summary>div{background:#211b29;border:1px solid #43384d;border-radius:10px;padding:12px 13px}.tccc-training-summary span{display:block;color:#aaa1b2!important;font-size:9px;text-transform:uppercase;letter-spacing:.65px;font-weight:800}.tccc-training-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:5px}.tccc-training-head{align-items:flex-start}.tccc-training-head>div span{display:block;margin-top:4px}.tccc-small-action{border:1px solid #564568;background:#2b2334;color:#e8dff0!important;border-radius:8px;padding:8px 10px;font-size:10px!important;font-weight:800!important;cursor:pointer;white-space:nowrap}.tccc-small-action:hover{border-color:#7c5fb0;background:#33273f}.tccc-queue-actions{display:flex;gap:5px;align-items:center}.tccc-queue-actions button{border:1px solid #4b4054;background:#241e2b;color:#d9d1df!important;border-radius:6px;min-width:30px;height:28px;padding:0 7px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-queue-actions button:hover:not(:disabled){background:#3b2a50;border-color:#7654bd;color:#fff!important}.tccc-queue-actions button:disabled{opacity:.28;cursor:not-allowed}.tccc-queue-actions button[data-train-action="next"]{color:#c6a9ff!important}.tccc-queue-actions button[data-train-action="skip"]{color:#f2bf7b!important}.tccc-training-log{display:flex;flex-direction:column;gap:7px}.tccc-training-log-row{display:grid;grid-template-columns:90px minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #39313f;border-radius:8px;background:#1a161f}.tccc-training-log-row>div{min-width:0}.tccc-training-log-row strong{display:block;color:#eee8f4!important;font-size:12px}.tccc-training-log-row>div span{display:block;color:#aaa2b2!important;font-size:10px;margin-top:2px}.tccc-training-log-row time{color:#918999!important;font-size:10px;white-space:nowrap}.tccc-rotation-badge{display:inline-block;text-align:center;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-rotation-badge.auto{background:#1f4b34;color:#8fe0ae!important}.tccc-rotation-badge.skip{background:#5a4021;color:#f5c781!important}.tccc-rotation-badge.reset{background:#3b304a;color:#cbb6e7!important}.tccc-training-log-empty{color:#aaa2b2!important;font-size:11px;padding:8px 2px}',
             '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}',
             '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
             '.tccc-empty{text-align:center;padding:70px 20px;color:#eee8f4}.tccc-empty p{color:#b3aabb!important;max-width:560px;margin:12px auto 18px;line-height:1.55}',
-            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-modal main{padding:10px}}',
+            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-modal main{padding:10px}}',
             '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
         ].join('\n');
         document.head.appendChild(style);
