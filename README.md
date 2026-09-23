@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.8.0
+**Current version:** 0.8.1
 
 ## Install
 
@@ -87,6 +87,7 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Current staffing mix by position
 - Configurable ideal headcount by position with short/on-target/over comparisons
 - Whole-company role optimizer that preserves those target slot counts
+- Manager-aware Store Manager selection using projected total effectiveness modifiers
 - Per-employee optimized role and projected working-stat effectiveness
 - Applicant best-planned-role and projected role-fit score
 - Company application-open/closed status
