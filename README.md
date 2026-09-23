@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.7.0
+**Current version:** 0.7.1
 
 ## Install
 
@@ -85,6 +85,7 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 ### Recruiting
 - Live hired/capacity and open-seat count
 - Current staffing mix by position
+- Configurable ideal headcount by position with short/on-target/over comparisons
 - Company application-open/closed status
 - Applicant level and all three working stats
 - Total work-stat display
