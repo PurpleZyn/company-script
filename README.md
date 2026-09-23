@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.5.0
+**Current version:** 0.5.1
 
 ## Install
 
@@ -78,6 +78,7 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Only current employees + matching keywords count toward dues
 - Multiple qualifying sends are accumulated toward the monthly requirement
 - Manual paid/unpaid overrides remain available
+- Reset-month control clears the current ledger and ignores earlier qualifying sends
 - Optional separate Custom log-only API key
 - Stored locally between sessions
 
