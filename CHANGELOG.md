@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.1 - 2026-09-23
+
+Completed-day analytics correction.
+
+### Changed
+- 7-day and 30-day rolling analytics now exclude the current in-progress TCT day.
+- Today is shown separately as **live / provisional** performance.
+- Daily history labels the current date as LIVE and prior dates as COMPLETE.
+- Overview trend now uses completed days only.
+- Analytics cards show a waiting state until at least one completed TCT day exists.
+- Company-rating summary now distinguishes completed history from total captured days.
+
+### Why
+Using today's partial sales against a full daily advertising budget made early-day revenue-per-ad-dollar, margin, and rolling averages look more authoritative than they really were. This update keeps live numbers visible while preventing them from contaminating historical averages.
+
 ## 0.9.0 - 2026-09-23
 
 Director Dashboard and Analytics.
