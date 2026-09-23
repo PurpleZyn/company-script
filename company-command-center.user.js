@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.4.0
+// @version      0.5.0
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.4.0',
+        version: '0.5.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -37,6 +37,9 @@
         trainingNews: [],
         fundNews: [],
         snapshots: {},
+        employeeHistory: {},
+        employeeFilter: 'all',
+        expandedEmployeeId: '',
         dues: {},
         duesScan: {
             status: 'idle',
@@ -172,6 +175,7 @@
         const savedSettings = store.get('settings', {});
         state.settings = Object.assign({}, state.settings, savedSettings || {});
         state.snapshots = store.get('snapshots', {}) || {};
+        state.employeeHistory = store.get('employeeHistory', {}) || {};
         state.dues = store.get('dues', {}) || {};
         state.trainingRotation = Object.assign({}, state.trainingRotation, store.get('trainingRotation', {}) || {});
         if (!Array.isArray(state.trainingRotation.order)) state.trainingRotation.order = [];
@@ -189,6 +193,10 @@
 
     function saveDues() {
         store.set('dues', state.dues);
+    }
+
+    function saveEmployeeHistory() {
+        store.set('employeeHistory', state.employeeHistory);
     }
 
     function saveTrainingRotation() {
@@ -516,6 +524,81 @@
         };
     }
 
+    function saveEmployeeSnapshot() {
+        if (!state.employees.length) return;
+
+        const day = tctDay();
+        const now = Math.floor(Date.now() / 1000);
+        const employees = {};
+
+        state.employees.forEach(function (employee) {
+            const eff = employee.effectiveness || {};
+            employees[String(employee.id)] = {
+                id: employee.id,
+                name: employee.name || '',
+                position: (employee.position && employee.position.name) || '',
+                wage: num(employee.wage),
+                daysInCompany: num(employee.days_in_company),
+                effectiveness: Object.assign({}, eff)
+            };
+        });
+
+        state.employeeHistory[day] = {
+            capturedAt: now,
+            employees: employees
+        };
+
+        const days = Object.keys(state.employeeHistory).sort();
+        while (days.length > 90) {
+            delete state.employeeHistory[days.shift()];
+        }
+        saveEmployeeHistory();
+    }
+
+    function previousEmployeeSnapshotDay() {
+        const today = tctDay();
+        const days = Object.keys(state.employeeHistory).filter(function (day) {
+            return day < today;
+        }).sort();
+        return days.length ? days[days.length - 1] : '';
+    }
+
+    function employeeTrend(employeeId) {
+        const today = state.employeeHistory[tctDay()];
+        const previousDay = previousEmployeeSnapshotDay();
+        const previous = previousDay ? state.employeeHistory[previousDay] : null;
+        const currentEntry = today && today.employees ? today.employees[String(employeeId)] : null;
+        const previousEntry = previous && previous.employees ? previous.employees[String(employeeId)] : null;
+
+        if (!currentEntry || !previousEntry) return null;
+
+        const currentEff = currentEntry.effectiveness || {};
+        const previousEff = previousEntry.effectiveness || {};
+        return {
+            previousDay: previousDay,
+            total: num(currentEff.total) - num(previousEff.total),
+            addiction: num(currentEff.addiction) - num(previousEff.addiction),
+            inactivity: num(currentEff.inactivity) - num(previousEff.inactivity)
+        };
+    }
+
+    function humanizeEffectivenessKey(key) {
+        return String(key || '')
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, function (letter) { return letter.toUpperCase(); });
+    }
+
+    function employeeStatus(employee) {
+        const eff = employee.effectiveness || {};
+        const addiction = num(eff.addiction);
+        const inactivity = num(eff.inactivity);
+
+        if (addiction < 0 && inactivity < 0) return { key: 'multiple', label: 'Multiple Issues', className: 'bad' };
+        if (addiction < 0) return { key: 'addiction', label: 'Addiction', className: 'bad' };
+        if (inactivity < 0) return { key: 'inactivity', label: 'Inactivity', className: 'bad' };
+        return { key: 'clear', label: 'Clear', className: 'good' };
+    }
+
     function parseFundEvent(entry) {
         const text = newsPlainText(entry && entry.text);
         if (!text) return null;
@@ -651,6 +734,7 @@
             state.fundNews = Array.isArray(results[4].news) ? results[4].news : [];
             syncTrainingRotation();
             await scanDuesLogs();
+            saveEmployeeSnapshot();
             saveTodaySnapshot();
         } catch (e) {
             state.error = e && e.message ? e.message : String(e);
@@ -1101,25 +1185,113 @@
     function employeesHtml() {
         if (!state.profile) return emptyConnectHtml();
 
-        const rows = state.employees.slice().sort(function (a, b) {
+        const allEmployees = state.employees.slice();
+        const averageEffectiveness = allEmployees.length ?
+            allEmployees.reduce(function (total, employee) {
+                return total + num(employee.effectiveness && employee.effectiveness.total);
+            }, 0) / allEmployees.length : 0;
+
+        const addictionCount = allEmployees.filter(function (employee) {
+            return num(employee.effectiveness && employee.effectiveness.addiction) < 0;
+        }).length;
+        const inactivityCount = allEmployees.filter(function (employee) {
+            return num(employee.effectiveness && employee.effectiveness.inactivity) < 0;
+        }).length;
+        const clearCount = allEmployees.filter(function (employee) {
+            const status = employeeStatus(employee);
+            return status.key === 'clear';
+        }).length;
+
+        let rows = allEmployees.slice().sort(function (a, b) {
+            const aIssue = employeeStatus(a).key === 'clear' ? 1 : 0;
+            const bIssue = employeeStatus(b).key === 'clear' ? 1 : 0;
+            if (aIssue !== bIssue) return aIssue - bIssue;
             return num(b.effectiveness && b.effectiveness.total) - num(a.effectiveness && a.effectiveness.total);
         });
 
-        let html = '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Employees</h3><span>' + rows.length + ' currently hired</span></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Employee</th><th>Position</th><th>Effectiveness</th><th>Addiction</th><th>Inactivity</th><th>Wage</th><th>Days</th></tr></thead><tbody>';
+        if (state.employeeFilter === 'issues') {
+            rows = rows.filter(function (employee) { return employeeStatus(employee).key !== 'clear'; });
+        } else if (state.employeeFilter === 'addiction') {
+            rows = rows.filter(function (employee) {
+                return num(employee.effectiveness && employee.effectiveness.addiction) < 0;
+            });
+        } else if (state.employeeFilter === 'inactivity') {
+            rows = rows.filter(function (employee) {
+                return num(employee.effectiveness && employee.effectiveness.inactivity) < 0;
+            });
+        }
 
-        rows.forEach(function (e) {
-            const eff = e.effectiveness || {};
-            html += '<tr><td><a href="/profiles.php?XID=' + encodeURIComponent(e.id) + '" target="_blank">' + esc(e.name) + '</a></td>' +
-                '<td>' + esc((e.position && e.position.name) || '') + '</td>' +
-                '<td><strong>' + esc(num(eff.total)) + '</strong></td>' +
-                '<td class="' + (num(eff.addiction) < 0 ? 'tccc-negative' : '') + '">' + esc(num(eff.addiction)) + '</td>' +
-                '<td class="' + (num(eff.inactivity) < 0 ? 'tccc-negative' : '') + '">' + esc(num(eff.inactivity)) + '</td>' +
-                '<td>' + esc(money.format(num(e.wage))) + '</td><td>' + esc(num(e.days_in_company)) + '</td></tr>';
+        let html = cards([
+            { label: 'Employees', value: allEmployees.length },
+            { label: 'Average Effectiveness', value: averageEffectiveness.toFixed(1) },
+            { label: 'No Active Penalties', value: clearCount + ' / ' + allEmployees.length, className: clearCount === allEmployees.length ? 'good' : '' },
+            { label: 'Addiction Penalties', value: addictionCount, className: addictionCount ? 'bad' : 'good' },
+            { label: 'Inactivity Penalties', value: inactivityCount, className: inactivityCount ? 'bad' : 'good' }
+        ]);
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Employee management</h3><span>Issues are shown first; expand any employee for the full effectiveness breakdown</span></div></div>';
+        html += '<div class="tccc-filterbar">';
+        [
+            ['all', 'All'],
+            ['issues', 'Issues'],
+            ['addiction', 'Addiction'],
+            ['inactivity', 'Inactivity']
+        ].forEach(function (filter) {
+            html += '<button data-employee-filter="' + filter[0] + '" class="' + (state.employeeFilter === filter[0] ? 'active' : '') + '">' + filter[1] + '</button>';
         });
+        html += '</div>';
+
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Employee</th><th>Position</th><th>Status</th><th>Effectiveness</th><th>Δ</th><th>Addiction</th><th>Inactivity</th><th>Wage</th><th>Days</th><th></th></tr></thead><tbody>';
+
+        if (!rows.length) {
+            html += '<tr><td colspan="10">No employees match this filter.</td></tr>';
+        } else {
+            rows.forEach(function (e) {
+                const eff = e.effectiveness || {};
+                const status = employeeStatus(e);
+                const trend = employeeTrend(e.id);
+                const delta = trend ? trend.total : null;
+                const expanded = String(state.expandedEmployeeId) === String(e.id);
+
+                html += '<tr><td><a href="/profiles.php?XID=' + encodeURIComponent(e.id) + '" target="_blank">' + esc(e.name) + '</a></td>' +
+                    '<td>' + esc((e.position && e.position.name) || '') + '</td>' +
+                    '<td><span class="tccc-employee-status ' + esc(status.className) + '">' + esc(status.label) + '</span></td>' +
+                    '<td><strong>' + esc(num(eff.total)) + '</strong></td>' +
+                    '<td class="' + (delta === null || delta === 0 ? '' : (delta > 0 ? 'tccc-positive' : 'tccc-negative')) + '">' +
+                    (delta === null ? '—' : esc((delta > 0 ? '+' : '') + delta)) + '</td>' +
+                    '<td class="' + (num(eff.addiction) < 0 ? 'tccc-negative' : '') + '">' + esc(num(eff.addiction)) + '</td>' +
+                    '<td class="' + (num(eff.inactivity) < 0 ? 'tccc-negative' : '') + '">' + esc(num(eff.inactivity)) + '</td>' +
+                    '<td>' + esc(money.format(num(e.wage))) + '</td><td>' + esc(num(e.days_in_company)) + '</td>' +
+                    '<td><button class="tccc-expand-employee" data-employee-expand="' + esc(e.id) + '">' + (expanded ? 'HIDE' : 'DETAILS') + '</button></td></tr>';
+
+                if (expanded) {
+                    const detailKeys = Object.keys(eff).filter(function (key) { return key !== 'total'; });
+                    html += '<tr class="tccc-employee-detail-row"><td colspan="10"><div class="tccc-employee-detail">';
+                    html += '<div class="tccc-employee-detail-head"><div><strong>' + esc(e.name) + '</strong><span>' + esc((e.position && e.position.name) || '') + ' · ' + esc(num(e.days_in_company)) + ' days in company</span></div>';
+                    if (trend) {
+                        html += '<div class="tccc-trend-note">Compared with ' + esc(trend.previousDay) + ': effectiveness ' +
+                            '<b class="' + (trend.total > 0 ? 'tccc-positive' : (trend.total < 0 ? 'tccc-negative' : '')) + '">' +
+                            esc((trend.total > 0 ? '+' : '') + trend.total) + '</b>, addiction ' +
+                            '<b class="' + (trend.addiction > 0 ? 'tccc-positive' : (trend.addiction < 0 ? 'tccc-negative' : '')) + '">' +
+                            esc((trend.addiction > 0 ? '+' : '') + trend.addiction) + '</b>, inactivity ' +
+                            '<b class="' + (trend.inactivity > 0 ? 'tccc-positive' : (trend.inactivity < 0 ? 'tccc-negative' : '')) + '">' +
+                            esc((trend.inactivity > 0 ? '+' : '') + trend.inactivity) + '</b></div>';
+                    } else {
+                        html += '<div class="tccc-trend-note">Trend history starts after the script has snapshots from more than one TCT day.</div>';
+                    }
+                    html += '</div><div class="tccc-effectiveness-grid">';
+                    detailKeys.forEach(function (key) {
+                        const value = num(eff[key]);
+                        html += '<div><span>' + esc(humanizeEffectivenessKey(key)) + '</span><strong class="' + (value < 0 ? 'tccc-negative' : (value > 0 ? 'tccc-positive' : '')) + '">' + esc(value) + '</strong></div>';
+                    });
+                    html += '<div><span>Total Effectiveness</span><strong>' + esc(num(eff.total)) + '</strong></div>';
+                    html += '</div></div></td></tr>';
+                }
+            });
+        }
 
         html += '</tbody></table></div></section>';
-        html += '<div class="tccc-note">Detailed wages, working stats and effectiveness require the director to use a Limited, Custom, or Full access key.</div>';
+        html += '<div class="tccc-note"><strong>History starts now:</strong> the script saves one rolling employee snapshot per TCT day for up to 90 days. The Δ column compares total effectiveness with the most recent earlier day. Expanding an employee shows every effectiveness component Torn returned, so we do not have to hard-code only addiction and inactivity.</div>';
         return html;
     }
 
@@ -1389,6 +1561,21 @@
             });
         });
 
+        document.querySelectorAll('[data-employee-filter]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                state.employeeFilter = button.getAttribute('data-employee-filter') || 'all';
+                render();
+            });
+        });
+
+        document.querySelectorAll('[data-employee-expand]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                const id = button.getAttribute('data-employee-expand');
+                state.expandedEmployeeId = String(state.expandedEmployeeId) === String(id) ? '' : String(id);
+                render();
+            });
+        });
+
         const resetTraining = document.getElementById('tccc-reset-training');
         if (resetTraining) resetTraining.addEventListener('click', resetTrainingRotation);
 
@@ -1421,6 +1608,7 @@
             exportedAt: new Date().toISOString(),
             settings: Object.assign({}, state.settings, { apiKey: '', duesApiKey: '' }),
             snapshots: state.snapshots,
+            employeeHistory: state.employeeHistory,
             dues: state.dues,
             trainingRotation: state.trainingRotation
         };
@@ -1442,6 +1630,7 @@
             try {
                 const payload = JSON.parse(reader.result);
                 if (payload.snapshots) state.snapshots = payload.snapshots;
+                if (payload.employeeHistory) state.employeeHistory = payload.employeeHistory;
                 if (payload.dues) state.dues = payload.dues;
                 if (payload.trainingRotation) state.trainingRotation = Object.assign({}, state.trainingRotation, payload.trainingRotation);
                 if (payload.settings) {
@@ -1453,6 +1642,7 @@
                     });
                 }
                 saveSnapshots();
+                saveEmployeeHistory();
                 saveDues();
                 saveTrainingRotation();
                 saveSettings();
@@ -1499,10 +1689,11 @@
             '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}.tccc-fund-badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:9px!important;font-weight:900!important;letter-spacing:.5px}.tccc-fund-badge.deposit{background:#1f4b34;color:#8fe0ae!important}.tccc-fund-badge.withdrawal{background:#582630;color:#ff9aa7!important}.tccc-fund-badge.other{background:#3a3341;color:#c4bbc9!important}.tccc-cash-equation{display:grid;grid-template-columns:minmax(150px,1fr) auto minmax(130px,1fr) auto minmax(130px,1fr) auto minmax(170px,1.2fr);gap:10px;align-items:stretch}.tccc-cash-equation>div{display:flex;flex-direction:column;justify-content:center;gap:5px;background:#19151e;border:1px solid #403649;border-radius:9px;padding:12px}.tccc-cash-equation>div.result{border-color:#7654bd;background:rgba(118,84,189,.08)}.tccc-cash-equation>div span{font-size:10px;color:#aaa2b3!important;text-transform:uppercase;font-weight:800;letter-spacing:.5px}.tccc-cash-equation>div strong{font-size:16px;color:#f4f0f8!important}.tccc-cash-equation>b{display:flex;align-items:center;color:#a58fbe!important;font-size:19px}',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
             '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}.tccc-training-next small{display:block;margin-top:7px;color:#c0b4cc!important;font-size:11px}.tccc-next-meta{text-align:right}.tccc-next-meta strong{font-size:20px!important}.tccc-training-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.tccc-training-summary>div{background:#211b29;border:1px solid #43384d;border-radius:10px;padding:12px 13px}.tccc-training-summary span{display:block;color:#aaa1b2!important;font-size:9px;text-transform:uppercase;letter-spacing:.65px;font-weight:800}.tccc-training-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:5px}.tccc-training-head{align-items:flex-start}.tccc-training-head>div span{display:block;margin-top:4px}.tccc-small-action{border:1px solid #564568;background:#2b2334;color:#e8dff0!important;border-radius:8px;padding:8px 10px;font-size:10px!important;font-weight:800!important;cursor:pointer;white-space:nowrap}.tccc-small-action:hover{border-color:#7c5fb0;background:#33273f}.tccc-queue-actions{display:flex;gap:5px;align-items:center}.tccc-queue-actions button{border:1px solid #4b4054;background:#241e2b;color:#d9d1df!important;border-radius:6px;min-width:30px;height:28px;padding:0 7px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-queue-actions button:hover:not(:disabled){background:#3b2a50;border-color:#7654bd;color:#fff!important}.tccc-queue-actions button:disabled{opacity:.28;cursor:not-allowed}.tccc-queue-actions button[data-train-action="next"]{color:#c6a9ff!important}.tccc-queue-actions button[data-train-action="skip"]{color:#f2bf7b!important}.tccc-training-log{display:flex;flex-direction:column;gap:7px}.tccc-training-log-row{display:grid;grid-template-columns:90px minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #39313f;border-radius:8px;background:#1a161f}.tccc-training-log-row>div{min-width:0}.tccc-training-log-row strong{display:block;color:#eee8f4!important;font-size:12px}.tccc-training-log-row>div span{display:block;color:#aaa2b2!important;font-size:10px;margin-top:2px}.tccc-training-log-row time{color:#918999!important;font-size:10px;white-space:nowrap}.tccc-rotation-badge{display:inline-block;text-align:center;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-rotation-badge.auto{background:#1f4b34;color:#8fe0ae!important}.tccc-rotation-badge.skip{background:#5a4021;color:#f5c781!important}.tccc-rotation-badge.reset{background:#3b304a;color:#cbb6e7!important}.tccc-training-log-empty{color:#aaa2b2!important;font-size:11px;padding:8px 2px}',
+            '.tccc-filterbar{display:flex;gap:7px;flex-wrap:wrap;margin:4px 0 12px}.tccc-filterbar button{border:1px solid #4c4056;background:#1c1722;color:#bfb6c7!important;border-radius:999px;padding:7px 10px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-filterbar button.active{background:#7449c8;border-color:#865ee0;color:#fff!important}.tccc-employee-status{display:inline-block;border-radius:999px;padding:5px 8px;font-size:9px!important;font-weight:900!important}.tccc-employee-status.good{background:#204b34;color:#8ee3ae!important}.tccc-employee-status.bad{background:#55252e;color:#ff98a4!important}.tccc-expand-employee{border:1px solid #564568;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 8px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-expand-employee:hover{border-color:#7b5ca5;background:#372a45}.tccc-employee-detail-row td{padding:0!important;background:#19151e!important}.tccc-employee-detail{padding:14px 16px 16px;border-left:3px solid #7654bd}.tccc-employee-detail-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:12px}.tccc-employee-detail-head strong{display:block;color:#f2edf6!important;font-size:14px}.tccc-employee-detail-head span{display:block;color:#a69dad!important;font-size:10px;margin-top:3px}.tccc-trend-note{color:#b4aabd!important;font-size:10px;line-height:1.45;text-align:right}.tccc-effectiveness-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.tccc-effectiveness-grid>div{background:#211b29;border:1px solid #3e3447;border-radius:8px;padding:9px 10px}.tccc-effectiveness-grid span{display:block;color:#a69dad!important;font-size:9px;text-transform:uppercase;letter-spacing:.5px;font-weight:800}.tccc-effectiveness-grid strong{display:block;color:#f1ebf5!important;font-size:14px;margin-top:4px}',
             '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}.tccc-dues-status{display:flex;gap:8px;flex-direction:column;border:1px solid #44394d;border-radius:10px;padding:12px 14px;margin-bottom:14px}.tccc-dues-status strong{font-size:12px!important}.tccc-dues-status span{font-size:11px!important;line-height:1.5;color:#b9b0c1!important}.tccc-dues-status.ready{background:#17251d;border-color:#315e46}.tccc-dues-status.ready strong{color:#8fe0ae!important}.tccc-dues-status.locked{background:#2a2023;border-color:#70404a}.tccc-dues-status.locked strong{color:#ff9aa7!important}.tccc-auto-reset{border:1px solid #604d70;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 7px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-auto-label{font-size:9px;color:#83d6a5!important;font-weight:900}.tccc-settings-divider{height:1px;background:#44394d;margin:20px 0}',
             '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number],.tccc-settings input[type=text]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
             '.tccc-empty{text-align:center;padding:70px 20px;color:#eee8f4}.tccc-empty p{color:#b3aabb!important;max-width:560px;margin:12px auto 18px;line-height:1.55}',
-            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-modal main{padding:10px}}',
+            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-effectiveness-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-employee-detail-head{flex-direction:column}.tccc-trend-note{text-align:left}.tccc-modal main{padding:10px}}',
             '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
         ].join('\n');
         document.head.appendChild(style);
