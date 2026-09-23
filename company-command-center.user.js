@@ -331,14 +331,14 @@
         activeTrainingEmployees().forEach(function (employee) {
             const id = String(employee.id);
             const latest = num(map[id] && map[id].last);
+            const hadBaseline = Object.prototype.hasOwnProperty.call(state.trainingRotation.lastSeen, id);
             const previous = num(state.trainingRotation.lastSeen[id]);
 
-            if (latest > previous && previous > 0) {
+            if (hadBaseline && latest > previous) {
                 detected.push({ id: id, timestamp: latest });
             }
 
-            if (latest > previous) state.trainingRotation.lastSeen[id] = latest;
-            if (state.trainingRotation.lastSeen[id] === undefined) state.trainingRotation.lastSeen[id] = latest;
+            if (!hadBaseline || latest > previous) state.trainingRotation.lastSeen[id] = latest;
         });
 
         detected.sort(function (a, b) {
