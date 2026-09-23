@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.2.0
+// @version      0.2.1
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.2.0',
+        version: '0.2.1',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -258,6 +258,70 @@
         };
     }
 
+    function parseFundEvent(entry) {
+        const text = newsPlainText(entry && entry.text);
+        if (!text) return null;
+
+        let match = text.match(/^(.+?) has made a deposit of \$([\d,]+) to the company funds$/i);
+        if (match) {
+            return {
+                timestamp: num(entry.timestamp),
+                actor: match[1].trim(),
+                type: 'deposit',
+                amount: num(match[2].replace(/,/g, '')),
+                text: text
+            };
+        }
+
+        match = text.match(/^(.+?) has withdrawn \$([\d,]+) from the company funds$/i);
+        if (match) {
+            return {
+                timestamp: num(entry.timestamp),
+                actor: match[1].trim(),
+                type: 'withdrawal',
+                amount: num(match[2].replace(/,/g, '')),
+                text: text
+            };
+        }
+
+        return {
+            timestamp: num(entry.timestamp),
+            actor: '',
+            type: 'other',
+            amount: 0,
+            text: text
+        };
+    }
+
+    function fundTransfersBetween(fromTimestamp, toTimestamp) {
+        const result = {
+            deposits: 0,
+            withdrawals: 0,
+            depositCount: 0,
+            withdrawalCount: 0,
+            unclassified: 0
+        };
+
+        state.fundNews.forEach(function (entry) {
+            const parsed = parseFundEvent(entry);
+            if (!parsed) return;
+            if (fromTimestamp && parsed.timestamp < fromTimestamp) return;
+            if (toTimestamp && parsed.timestamp > toTimestamp) return;
+
+            if (parsed.type === 'deposit') {
+                result.deposits += parsed.amount;
+                result.depositCount += 1;
+            } else if (parsed.type === 'withdrawal') {
+                result.withdrawals += parsed.amount;
+                result.withdrawalCount += 1;
+            } else {
+                result.unclassified += 1;
+            }
+        });
+
+        return result;
+    }
+
     function saveTodaySnapshot() {
         if (!state.profile) return;
         const f = financeSummary();
@@ -265,11 +329,16 @@
         const now = Math.floor(Date.now() / 1000);
         const currentFunds = num(state.profile.funds);
         const previous = state.snapshots[key] || {};
+        const openingCapturedAt = previous.openingCapturedAt || previous.capturedAt || now;
+        const openingFunds = previous.openingFunds !== undefined ? num(previous.openingFunds) :
+            (previous.funds !== undefined ? num(previous.funds) : currentFunds);
+        const transfers = fundTransfersBetween(openingCapturedAt, now);
+        const rawFundsChange = currentFunds - openingFunds;
+        const adjustedCashChange = rawFundsChange - transfers.deposits + transfers.withdrawals;
 
         state.snapshots[key] = {
-            openingCapturedAt: previous.openingCapturedAt || previous.capturedAt || now,
-            openingFunds: previous.openingFunds !== undefined ? num(previous.openingFunds) :
-                (previous.funds !== undefined ? num(previous.funds) : currentFunds),
+            openingCapturedAt: openingCapturedAt,
+            openingFunds: openingFunds,
             capturedAt: now,
             revenue: f.revenue,
             weeklyRevenue: f.weeklyRevenue,
@@ -283,6 +352,10 @@
             operatingProfit: f.operatingProfit,
             net: f.operatingProfit,
             funds: currentFunds,
+            rawFundsChange: rawFundsChange,
+            externalDeposits: transfers.deposits,
+            externalWithdrawals: transfers.withdrawals,
+            adjustedCashChange: adjustedCashChange,
             rating: num(state.profile.rating)
         };
 
@@ -458,7 +531,13 @@
         const f = financeSummary();
         const history = Object.keys(state.snapshots).sort().reverse().slice(0, 14);
         const today = state.snapshots[tctDay()] || {};
-        const fundsChange = num(today.funds) - num(today.openingFunds);
+        const fundsChange = today.rawFundsChange !== undefined ? num(today.rawFundsChange) :
+            (num(today.funds) - num(today.openingFunds));
+        const externalDeposits = num(today.externalDeposits);
+        const externalWithdrawals = num(today.externalWithdrawals);
+        const externalTransferNet = externalDeposits - externalWithdrawals;
+        const adjustedCashChange = today.adjustedCashChange !== undefined ? num(today.adjustedCashChange) :
+            (fundsChange - externalDeposits + externalWithdrawals);
         const stockMatchesRevenue = Math.abs(f.stockSales - f.revenue) <= 1;
 
         let html = cards([
@@ -500,10 +579,21 @@
                 sub: 'At today\'s product-margin mix'
             },
             {
-                label: 'Funds Change',
+                label: 'Raw Funds Change',
                 value: (fundsChange >= 0 ? '+' : '') + money.format(fundsChange),
-                sub: 'Since this device first captured today',
+                sub: 'Vault movement since first capture today',
                 className: fundsChange >= 0 ? 'good' : 'bad'
+            },
+            {
+                label: 'External Transfers',
+                value: (externalTransferNet >= 0 ? '+' : '') + money.format(externalTransferNet),
+                sub: money.format(externalDeposits) + ' in / ' + money.format(externalWithdrawals) + ' out'
+            },
+            {
+                label: 'Adjusted Cash Change',
+                value: (adjustedCashChange >= 0 ? '+' : '') + money.format(adjustedCashChange),
+                sub: 'Vault movement with deposits/withdrawals removed',
+                className: adjustedCashChange >= 0 ? 'good' : 'bad'
             }
         ]);
 
@@ -518,10 +608,18 @@
         html += '<tr class="tccc-finance-total"><td><strong>Estimated operating profit</strong></td><td class="' + (f.operatingProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '"><strong>' + esc(money.format(f.operatingProfit)) + '</strong></td><td>' + esc(f.operatingMargin.toFixed(1)) + '% operating margin</td></tr>';
         html += '</tbody></table></div></section>';
 
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Cash reconciliation</h3><span>Separates outside player transfers from company-generated cash movement</span></div>';
+        html += '<div class="tccc-cash-equation">';
+        html += '<div><span>Raw funds change</span><strong class="' + (fundsChange >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc((fundsChange >= 0 ? '+' : '') + money.format(fundsChange)) + '</strong></div>';
+        html += '<b>−</b><div><span>Deposits</span><strong>' + esc(money.format(externalDeposits)) + '</strong></div>';
+        html += '<b>+</b><div><span>Withdrawals</span><strong>' + esc(money.format(externalWithdrawals)) + '</strong></div>';
+        html += '<b>=</b><div class="result"><span>Adjusted cash change</span><strong class="' + (adjustedCashChange >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc((adjustedCashChange >= 0 ? '+' : '') + money.format(adjustedCashChange)) + '</strong></div>';
+        html += '</div></section>';
+
         html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Recent daily snapshots</h3><span>Latest value for each TCT day; opening funds preserved separately</span></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>TCT Day</th><th>Sales</th><th>COGS</th><th>Ads + Wages</th><th>Operating Profit</th><th>Funds</th><th>Funds Δ</th></tr></thead><tbody>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>TCT Day</th><th>Sales</th><th>COGS</th><th>Ads + Wages</th><th>Operating Profit</th><th>Funds</th><th>Raw Δ</th><th>External Transfers</th><th>Adjusted Cash Δ</th></tr></thead><tbody>';
         if (!history.length) {
-            html += '<tr><td colspan="7">No history yet.</td></tr>';
+            html += '<tr><td colspan="9">No history yet.</td></tr>';
         } else {
             history.forEach(function (day) {
                 const s = state.snapshots[day];
@@ -529,29 +627,51 @@
                 const dayCogs = num(s.cogs);
                 const overhead = num(s.advertising) + num(s.wages);
                 const opening = s.openingFunds !== undefined ? num(s.openingFunds) : num(s.funds);
-                const delta = num(s.funds) - opening;
+                const delta = s.rawFundsChange !== undefined ? num(s.rawFundsChange) : (num(s.funds) - opening);
+                const deposits = num(s.externalDeposits);
+                const withdrawals = num(s.externalWithdrawals);
+                const transferNet = deposits - withdrawals;
+                const adjusted = s.adjustedCashChange !== undefined ? num(s.adjustedCashChange) :
+                    (delta - deposits + withdrawals);
+
                 html += '<tr><td>' + esc(day) + '</td><td>' + esc(money.format(num(s.revenue))) + '</td><td>' +
                     esc(money.format(dayCogs)) + '</td><td>' + esc(money.format(overhead)) + '</td><td class="' +
                     (op >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(op)) + '</td><td>' +
                     esc(money.format(num(s.funds))) + '</td><td class="' + (delta >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' +
-                    esc((delta >= 0 ? '+' : '') + money.format(delta)) + '</td></tr>';
+                    esc((delta >= 0 ? '+' : '') + money.format(delta)) + '</td><td>' +
+                    esc((transferNet >= 0 ? '+' : '') + money.format(transferNet)) + '</td><td class="' +
+                    (adjusted >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' +
+                    esc((adjusted >= 0 ? '+' : '') + money.format(adjusted)) + '</td></tr>';
             });
         }
         html += '</tbody></table></div></section>';
 
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Recent company fund activity</h3><span>Raw Torn funds-news feed — useful for separating transfers from real profit/loss</span></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>When</th><th>Fund event</th></tr></thead><tbody>';
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Recent company fund activity</h3><span>Deposits and withdrawals are removed from adjusted cash performance</span></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>When</th><th>Type</th><th>Fund event</th></tr></thead><tbody>';
         if (!state.fundNews.length) {
-            html += '<tr><td colspan="2">No recent fund-news entries were returned.</td></tr>';
+            html += '<tr><td colspan="3">No recent fund-news entries were returned.</td></tr>';
         } else {
             state.fundNews.slice(0, 15).forEach(function (entry) {
-                html += '<tr><td>' + esc(formatDate(entry.timestamp)) + '</td><td class="tccc-news-text">' +
-                    esc(newsPlainText(entry.text)) + '</td></tr>';
+                const parsed = parseFundEvent(entry);
+                let eventClass = '';
+                let badge = 'OTHER';
+
+                if (parsed && parsed.type === 'deposit') {
+                    eventClass = 'tccc-positive';
+                    badge = 'DEPOSIT';
+                } else if (parsed && parsed.type === 'withdrawal') {
+                    eventClass = 'tccc-negative';
+                    badge = 'WITHDRAWAL';
+                }
+
+                html += '<tr><td>' + esc(formatDate(entry.timestamp)) + '</td><td><span class="tccc-fund-badge ' +
+                    esc(parsed ? parsed.type : 'other') + '">' + esc(badge) + '</span></td><td class="tccc-news-text ' +
+                    eventClass + '">' + esc(parsed ? parsed.text : newsPlainText(entry.text)) + '</td></tr>';
             });
         }
         html += '</tbody></table></div></section>';
 
-        html += '<div class="tccc-note"><strong>Why two numbers?</strong> Operating profit measures whether the company\'s sales covered the cost of sold stock, advertising, wages, and other daily costs. Funds change measures what happened to the company vault on this device since its first capture today. Deposits, withdrawals, and the timing of stock orders can make those two numbers different. The fund-news feed above is the next piece we will use to reconcile that difference automatically.</div>';
+        html += '<div class="tccc-note"><strong>How to read this:</strong> Operating profit is the sales-side estimate. Raw funds change is what happened to the company vault. Adjusted cash change removes player deposits and withdrawals detected in Torn\'s funds news, so those outside transfers are not mistaken for company performance. Stock-order timing can still make operating profit and adjusted cash change differ, which is exactly what we will measure as the history builds.</div>';
         return html;
     }
 
@@ -851,13 +971,13 @@
             '.tccc-attention{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}.tccc-attention button{display:flex;flex-direction:column;text-align:left;background:#18141d;border:1px solid #413747;border-radius:10px;padding:13px;color:#e7e1ed!important;cursor:pointer}.tccc-attention button:hover{border-color:#674f82;background:#1d1724}.tccc-attention strong{font-size:18px;line-height:1.15;color:#c2a4ff!important}.tccc-attention span{font-size:11px;line-height:1.35;margin-top:5px;color:#b0a8b8!important}',
             '.tccc-health{margin-top:12px}.tccc-health-row{margin-bottom:12px}.tccc-health-row>div:first-child{display:flex;justify-content:space-between;font-size:12px;line-height:1.3;color:#e8e2ed!important;margin-bottom:6px}.tccc-health-row b{color:#fff!important}.tccc-meter{height:8px;background:#151219;border-radius:99px;overflow:hidden}.tccc-meter span{display:block;height:100%;background:linear-gradient(90deg,#704bc0,#b394ff)}',
             '.tccc-note{font-size:11px;line-height:1.55;color:#b2aaba!important;padding:11px 13px;border-left:3px solid #7654bd;background:#19151e;border-radius:6px}.tccc-note strong{color:#e8dfff!important}',
-            '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}',
+            '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}.tccc-fund-badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:9px!important;font-weight:900!important;letter-spacing:.5px}.tccc-fund-badge.deposit{background:#1f4b34;color:#8fe0ae!important}.tccc-fund-badge.withdrawal{background:#582630;color:#ff9aa7!important}.tccc-fund-badge.other{background:#3a3341;color:#c4bbc9!important}.tccc-cash-equation{display:grid;grid-template-columns:minmax(150px,1fr) auto minmax(130px,1fr) auto minmax(130px,1fr) auto minmax(170px,1.2fr);gap:10px;align-items:stretch}.tccc-cash-equation>div{display:flex;flex-direction:column;justify-content:center;gap:5px;background:#19151e;border:1px solid #403649;border-radius:9px;padding:12px}.tccc-cash-equation>div.result{border-color:#7654bd;background:rgba(118,84,189,.08)}.tccc-cash-equation>div span{font-size:10px;color:#aaa2b3!important;text-transform:uppercase;font-weight:800;letter-spacing:.5px}.tccc-cash-equation>div strong{font-size:16px;color:#f4f0f8!important}.tccc-cash-equation>b{display:flex;align-items:center;color:#a58fbe!important;font-size:19px',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
             '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}',
             '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}',
             '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
             '.tccc-empty{text-align:center;padding:70px 20px;color:#eee8f4}.tccc-empty p{color:#b3aabb!important;max-width:560px;margin:12px auto 18px;line-height:1.55}',
-            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-modal main{padding:10px}}',
+            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-modal main{padding:10px}}',
             '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
         ].join('\n');
         document.head.appendChild(style);
