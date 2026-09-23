@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.8.1
+**Current version:** 0.9.0
 
 ## Install
 
@@ -30,9 +30,20 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.8.0 does
+## What v0.9.0 does
 
 ### Overview
+- Director Brief combining finances, training, dues, employee issues, stock risk, recruiting, staffing, and role optimization
+- At-a-glance company rating, operating profit, sales, funds, and recorded trends
+
+### Analytics
+- 7-day and 30-day locally recorded performance summaries
+- Average sales, operating profit, operating margin, advertising burden, and revenue per advertising dollar
+- Adjusted cash-movement history
+- Daily company-health history
+- Star-rating history
+- Average employee-effectiveness history where data is available
+
 - Current Torn-reported daily company revenue
 - Estimated tracked expenses
 - Estimated net profit/loss
