@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.1 - 2026-09-23
+
+eDVD dues reset control.
+
+### Added
+- **Reset month** button on the eDVD Dues tab.
+- Confirmation prompt before clearing the current month's dues ledger.
+- Reset baseline timestamp for the current month.
+- Automatic scanner ignores qualifying eDVD sends received before the reset baseline.
+- Reset baseline is included in JSON backup/export and import.
+
+### Why
+This makes testing and month re-initialization possible without old qualifying eDVD sends immediately repopulating the ledger after a manual reset.
+
 ## 0.5.0 - 2026-09-23
 
 Employee management expansion.
