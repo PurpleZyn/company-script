@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.2.0
+**Current version:** 0.2.1
 
 ## Install
 
@@ -47,7 +47,7 @@ The finance page now separates profitability into:
 
 **Gross profit - advertising - wages - manual daily costs = estimated operating profit**
 
-It also shows gross margin, operating margin, estimated break-even sales, company-fund changes, and the company's recent funds-news feed. The funds feed is intentionally shown separately because deposits, withdrawals, and stock-order timing can move the company vault without being profit or loss.
+It also shows gross margin, operating margin, estimated break-even sales, raw company-fund changes, and an adjusted cash-change figure. Deposits into the company are subtracted from raw fund movement and withdrawals are added back, so director/player transfers do not get mistaken for company profit or loss. Stock-order timing can still cause adjusted cash change to differ from operating profit.
 
 The dashboard stores a local daily snapshot whenever it refreshes, allowing a running history to build over time.
 
