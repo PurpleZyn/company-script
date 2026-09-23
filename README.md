@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.6.0
+**Current version:** 0.7.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.6.0 does
+## What v0.7.0 does
 
 ### Overview
 - Current Torn-reported daily company revenue
@@ -81,6 +81,15 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Reset-month control clears the current ledger and ignores earlier qualifying sends
 - Optional separate Custom log-only API key
 - Stored locally between sessions
+
+### Recruiting
+- Live hired/capacity and open-seat count
+- Current staffing mix by position
+- Company application-open/closed status
+- Applicant level and all three working stats
+- Total work-stat display
+- Application message, status, expiration countdown, and profile link
+- Expiring-soon warning
 
 ### Stock
 - In-stock amount and stock already on order
