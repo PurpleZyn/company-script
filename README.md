@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.1.1
+**Current version:** 0.2.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.1.0 does
+## What v0.2.0 does
 
 ### Overview
 - Current Torn-reported daily company revenue
@@ -41,9 +41,13 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 - At-a-glance alerts for training, unpaid eDVDs, employee effectiveness, and low stock
 
 ### Finances
-The first operating estimate is:
+The finance page now separates profitability into:
 
-**Daily revenue - wages - advertising - estimated stock cost of goods sold - manual daily costs**
+**Gross sales - estimated cost of goods sold = gross profit**
+
+**Gross profit - advertising - wages - manual daily costs = estimated operating profit**
+
+It also shows gross margin, operating margin, estimated break-even sales, company-fund changes, and the company's recent funds-news feed. The funds feed is intentionally shown separately because deposits, withdrawals, and stock-order timing can move the company vault without being profit or loss.
 
 The dashboard stores a local daily snapshot whenever it refreshes, allowing a running history to build over time.
 
