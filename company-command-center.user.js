@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.9.0
+// @version      0.9.1
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.9.0',
+        version: '0.9.1',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -1117,6 +1117,15 @@
         return typeof limit === 'number' ? days.slice(0, limit) : days;
     }
 
+    function completedSnapshotDays(limit) {
+        const today = tctDay();
+        const days = Object.keys(state.snapshots)
+            .filter(function (day) { return day < today; })
+            .sort()
+            .reverse();
+        return typeof limit === 'number' ? days.slice(0, limit) : days;
+    }
+
     function average(values) {
         if (!values.length) return 0;
         return values.reduce(function (sum, value) { return sum + num(value); }, 0) / values.length;
@@ -1191,14 +1200,15 @@
         };
     }
 
-    function analyticsWindow(days) {
-        return recordedSnapshotDays(days).map(function (day) {
+    function analyticsWindow(days, completedOnly) {
+        const sourceDays = completedOnly ? completedSnapshotDays(days) : recordedSnapshotDays(days);
+        return sourceDays.map(function (day) {
             return { day: day, snapshot: state.snapshots[day] };
         });
     }
 
-    function analyticsSummary(days) {
-        const rows = analyticsWindow(days);
+    function analyticsSummary(days, completedOnly) {
+        const rows = analyticsWindow(days, completedOnly);
         const snapshots = rows.map(function (row) { return row.snapshot; });
         const revenues = snapshots.map(function (snapshot) { return num(snapshot.revenue); });
         const profits = snapshots.map(snapshotOperatingProfit);
@@ -1243,34 +1253,48 @@
         if (!state.profile) return emptyConnectHtml();
 
         const allDays = recordedSnapshotDays();
-        const seven = analyticsSummary(7);
-        const thirty = analyticsSummary(30);
+        const completedDays = completedSnapshotDays();
+        const seven = analyticsSummary(7, true);
+        const thirty = analyticsSummary(30, true);
+        const live = financeSummary();
         const currentRating = num(state.profile.rating);
         const ratingHistory = ratingHistorySummary();
         const oldestRating = allDays.length ? num(state.snapshots[allDays[allDays.length - 1]].rating) : currentRating;
         const ratingDelta = currentRating - oldestRating;
+        const hasCompleted = completedDays.length > 0;
 
         let html = cards([
             {
-                label: 'History Depth',
-                value: allDays.length + ' day' + (allDays.length === 1 ? '' : 's'),
-                sub: 'Local TCT-day snapshots'
+                label: 'Today · Live Sales',
+                value: money.format(live.revenue),
+                sub: 'In-progress TCT day'
             },
             {
-                label: '7d Avg Sales',
-                value: money.format(seven.avgRevenue),
-                sub: seven.days + ' recorded day' + (seven.days === 1 ? '' : 's')
+                label: 'Today · Live Op. Profit',
+                value: money.format(live.operatingProfit),
+                sub: live.operatingMargin.toFixed(1) + '% provisional margin',
+                className: live.operatingProfit >= 0 ? 'good' : 'bad'
             },
             {
-                label: '7d Avg Op. Profit',
-                value: money.format(seven.avgProfit),
-                sub: seven.avgMargin.toFixed(1) + '% average margin',
-                className: seven.avgProfit >= 0 ? 'good' : 'bad'
+                label: 'Completed History',
+                value: completedDays.length + ' day' + (completedDays.length === 1 ? '' : 's'),
+                sub: allDays.length + ' total day snapshot' + (allDays.length === 1 ? '' : 's') + ' including today'
+            },
+            {
+                label: '7d Completed Avg Sales',
+                value: hasCompleted ? money.format(seven.avgRevenue) : '—',
+                sub: hasCompleted ? seven.days + ' completed day' + (seven.days === 1 ? '' : 's') : 'Starts after the first completed TCT day'
+            },
+            {
+                label: '7d Completed Avg Profit',
+                value: hasCompleted ? money.format(seven.avgProfit) : '—',
+                sub: hasCompleted ? seven.avgMargin.toFixed(1) + '% average margin' : 'Today is excluded while still in progress',
+                className: hasCompleted ? (seven.avgProfit >= 0 ? 'good' : 'bad') : ''
             },
             {
                 label: 'Revenue / Ad Dollar',
-                value: seven.revenuePerAdDollar ? seven.revenuePerAdDollar.toFixed(2) + '×' : '—',
-                sub: seven.adBurden.toFixed(1) + '% of recorded sales spent on ads'
+                value: hasCompleted && seven.revenuePerAdDollar ? seven.revenuePerAdDollar.toFixed(2) + '×' : '—',
+                sub: hasCompleted ? seven.adBurden.toFixed(1) + '% ad burden across completed days' : 'Waiting for completed-day data'
             },
             {
                 label: 'Current Stars',
@@ -1278,35 +1302,50 @@
                 sub: (ratingDelta >= 0 ? '+' : '') + ratingDelta + ' across recorded history'
             },
             {
-                label: '30d Op. Profit',
-                value: money.format(thirty.totalProfit),
-                sub: thirty.days + ' recorded day' + (thirty.days === 1 ? '' : 's'),
-                className: thirty.totalProfit >= 0 ? 'good' : 'bad'
+                label: '30d Completed Profit',
+                value: thirty.days ? money.format(thirty.totalProfit) : '—',
+                sub: thirty.days ? thirty.days + ' completed day' + (thirty.days === 1 ? '' : 's') : 'No completed days yet',
+                className: thirty.days ? (thirty.totalProfit >= 0 ? 'good' : 'bad') : ''
             }
         ]);
 
         html += '<div class="tccc-grid2">';
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>7-day performance</h3><span>Uses up to the latest 7 locally captured TCT days</span></div></div><div class="tccc-analytics-grid">';
-        html += '<div><span>Total sales</span><strong>' + esc(money.format(seven.totalRevenue)) + '</strong></div>';
-        html += '<div><span>Total operating profit</span><strong class="' + (seven.totalProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(seven.totalProfit)) + '</strong></div>';
-        html += '<div><span>Average operating margin</span><strong class="' + (seven.avgMargin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(seven.avgMargin.toFixed(1) + '%') + '</strong></div>';
-        html += '<div><span>Advertising spend</span><strong>' + esc(money.format(seven.totalAds)) + '</strong></div>';
-        html += '<div><span>Revenue per ad dollar</span><strong>' + (seven.revenuePerAdDollar ? esc(seven.revenuePerAdDollar.toFixed(2) + '×') : '—') + '</strong></div>';
-        html += '<div><span>Adjusted cash movement</span><strong class="' + (seven.adjustedCash >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc((seven.adjustedCash >= 0 ? '+' : '') + money.format(seven.adjustedCash)) + '</strong></div>';
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Today · live performance</h3><span>Current TCT day — provisional until reset</span></div></div><div class="tccc-analytics-grid">';
+        html += '<div><span>Sales so far</span><strong>' + esc(money.format(live.revenue)) + '</strong></div>';
+        html += '<div><span>Operating profit so far</span><strong class="' + (live.operatingProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(live.operatingProfit)) + '</strong></div>';
+        html += '<div><span>Current operating margin</span><strong class="' + (live.operatingMargin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(live.operatingMargin.toFixed(1) + '%') + '</strong></div>';
+        html += '<div><span>Advertising budget</span><strong>' + esc(money.format(live.advertising)) + '</strong></div>';
+        html += '<div><span>Revenue per ad dollar so far</span><strong>' + (live.advertising > 0 ? esc((live.revenue / live.advertising).toFixed(2) + '×') : '—') + '</strong></div>';
+        html += '<div><span>Break-even sales</span><strong>' + esc(money.format(live.breakEvenRevenue)) + '</strong></div>';
         html += '</div></section>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>7-day completed performance</h3><span>Current TCT day is excluded</span></div></div>';
+        if (!hasCompleted) {
+            html += '<div class="tccc-recruit-empty"><strong>Waiting for the first completed day</strong><span>Tomorrow, today\'s final stored snapshot becomes the first completed-day data point for rolling analytics.</span></div>';
+        } else {
+            html += '<div class="tccc-analytics-grid">';
+            html += '<div><span>Total sales</span><strong>' + esc(money.format(seven.totalRevenue)) + '</strong></div>';
+            html += '<div><span>Total operating profit</span><strong class="' + (seven.totalProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(seven.totalProfit)) + '</strong></div>';
+            html += '<div><span>Average operating margin</span><strong class="' + (seven.avgMargin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(seven.avgMargin.toFixed(1) + '%') + '</strong></div>';
+            html += '<div><span>Advertising spend</span><strong>' + esc(money.format(seven.totalAds)) + '</strong></div>';
+            html += '<div><span>Revenue per ad dollar</span><strong>' + (seven.revenuePerAdDollar ? esc(seven.revenuePerAdDollar.toFixed(2) + '×') : '—') + '</strong></div>';
+            html += '<div><span>Adjusted cash movement</span><strong class="' + (seven.adjustedCash >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc((seven.adjustedCash >= 0 ? '+' : '') + money.format(seven.adjustedCash)) + '</strong></div>';
+            html += '</div>';
+        }
+        html += '</section></div>';
 
         html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Company health now</h3><span>Current Torn company metrics</span></div></div><div class="tccc-health">';
         html += healthRow('Efficiency', state.profile.efficiency);
         html += healthRow('Environment', state.profile.environment);
         html += healthRow('Popularity', state.profile.popularity);
         html += healthRow('Available trains', state.profile.trains, true);
-        html += '</div></section></div>';
+        html += '</div></section>';
 
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Daily performance history</h3><span>Last refresh captured for each TCT day</span></div></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>TCT Day</th><th>Sales</th><th>Operating Profit</th><th>Margin</th><th>Advertising</th><th>Ad Burden</th><th>Adjusted Cash Δ</th><th>Stars</th><th>Avg Employee Eff.</th><th>Eff.</th><th>Env.</th><th>Pop.</th></tr></thead><tbody>';
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Daily performance history</h3><span>Today is marked LIVE; prior dates are completed historical snapshots</span></div></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>TCT Day</th><th>State</th><th>Sales</th><th>Operating Profit</th><th>Margin</th><th>Advertising</th><th>Ad Burden</th><th>Adjusted Cash Δ</th><th>Stars</th><th>Avg Employee Eff.</th><th>Eff.</th><th>Env.</th><th>Pop.</th></tr></thead><tbody>';
 
         if (!allDays.length) {
-            html += '<tr><td colspan="12">No analytics history yet.</td></tr>';
+            html += '<tr><td colspan="13">No analytics history yet.</td></tr>';
         } else {
             allDays.slice(0, 30).forEach(function (day) {
                 const snapshot = state.snapshots[day] || {};
@@ -1317,8 +1356,9 @@
                 const adBurden = revenue > 0 ? (ad / revenue) * 100 : 0;
                 const adjusted = snapshot.adjustedCashChange !== undefined ? num(snapshot.adjustedCashChange) : 0;
                 const employeeAverage = averageEmployeeEffectivenessForDay(day);
+                const isLive = day === tctDay();
 
-                html += '<tr><td>' + esc(day) + '</td><td>' + esc(money.format(revenue)) + '</td><td class="' +
+                html += '<tr' + (isLive ? ' class="tccc-live-row"' : '') + '><td>' + esc(day) + '</td><td><span class="tccc-day-state ' + (isLive ? 'live' : 'complete') + '">' + (isLive ? 'LIVE' : 'COMPLETE') + '</span></td><td>' + esc(money.format(revenue)) + '</td><td class="' +
                     (profit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(profit)) + '</td><td class="' +
                     (margin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(margin.toFixed(1) + '%') + '</td><td>' +
                     esc(money.format(ad)) + '</td><td>' + esc(adBurden.toFixed(1) + '%') + '</td><td class="' +
@@ -1343,7 +1383,7 @@
         }
         html += '</div></section>';
 
-        html += '<div class="tccc-note"><strong>History caveat:</strong> this script is local-first. Each TCT day stores the latest values seen when you refreshed/opened the dashboard that day. If the final refresh happened before the day was finished, sales/profit for that historical day may be partial. Analytics become more representative as more completed-day snapshots accumulate.</div>';
+        html += '<div class="tccc-note"><strong>Historical analytics now exclude today.</strong> Live numbers remain visible separately, but 7-day and 30-day rolling metrics only use dates before the current TCT day. Because the script is local-first, a completed day still reflects the last snapshot you captured on that date; refreshing near the end of TCT gives the most complete historical record.</div>';
         return html;
     }
 
@@ -1382,6 +1422,7 @@
         const staffing = staffingPlanSummary();
         const optimizer = currentOptimizerSummary();
         const historyDepth = recordedSnapshotDays().length;
+        const completedHistoryDepth = completedSnapshotDays().length;
 
         let html = cards([
             {
@@ -1403,7 +1444,7 @@
             {
                 label: 'Company Rating',
                 value: num(state.profile.rating) + '★',
-                sub: historyDepth + ' recorded analytics day' + (historyDepth === 1 ? '' : 's')
+                sub: completedHistoryDepth + ' completed · ' + historyDepth + ' total captured day' + (historyDepth === 1 ? '' : 's')
             }
         ]);
 
@@ -1445,12 +1486,17 @@
         html += healthRow('Available trains', state.profile.trains, true);
         html += '</div></section>';
 
-        const seven = analyticsSummary(7);
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Recorded trend</h3><span>Up to 7 local TCT days</span></div><div class="tccc-overview-trend">';
-        html += '<div><span>Avg sales</span><strong>' + esc(money.format(seven.avgRevenue)) + '</strong></div>';
-        html += '<div><span>Avg operating profit</span><strong class="' + (seven.avgProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(seven.avgProfit)) + '</strong></div>';
-        html += '<div><span>Avg operating margin</span><strong class="' + (seven.avgMargin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(seven.avgMargin.toFixed(1) + '%') + '</strong></div>';
-        html += '<div><span>History depth</span><strong>' + esc(seven.days) + ' day' + (seven.days === 1 ? '' : 's') + '</strong></div>';
+        const seven = analyticsSummary(7, true);
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Completed-day trend</h3><span>Current TCT day excluded</span></div><div class="tccc-overview-trend">';
+        if (!seven.days) {
+            html += '<div class="tccc-trend-waiting"><span>Rolling analytics</span><strong>Starts tomorrow</strong></div>';
+            html += '<div><span>Completed history</span><strong>0 days</strong></div>';
+        } else {
+            html += '<div><span>Avg sales</span><strong>' + esc(money.format(seven.avgRevenue)) + '</strong></div>';
+            html += '<div><span>Avg operating profit</span><strong class="' + (seven.avgProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(seven.avgProfit)) + '</strong></div>';
+            html += '<div><span>Avg operating margin</span><strong class="' + (seven.avgMargin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(seven.avgMargin.toFixed(1) + '%') + '</strong></div>';
+            html += '<div><span>Completed history</span><strong>' + esc(seven.days) + ' day' + (seven.days === 1 ? '' : 's') + '</strong></div>';
+        }
         html += '</div></section></div>';
 
         html += '<div class="tccc-note">The Director Brief combines the systems already built into the script. It is meant to surface attention items, not replace the detailed tabs. Financial figures remain estimates based on Torn-reported sales, item costs, advertising, wages, and your configured manual costs.</div>';
@@ -2737,7 +2783,7 @@
             '.tccc-card{background:#231e2a;border:1px solid #44394d;border-radius:12px;padding:16px;min-height:92px}.tccc-card.good{border-color:#376849}.tccc-card.bad{border-color:#7e3948}',
             '.tccc-card-label{font-size:11px;line-height:1.2;text-transform:uppercase;letter-spacing:.8px;color:#b3abbc!important;font-weight:800}.tccc-card-value{font-size:22px;line-height:1.15;font-weight:900;color:#f5f1f8!important;margin-top:8px}.tccc-card-sub{font-size:11px;line-height:1.4;color:#aaa2b2!important;margin-top:6px}',
             '.tccc-grid2{display:grid;grid-template-columns:1.25fr 1fr;gap:14px}.tccc-panel{background:#231e2a;border:1px solid #44394d;border-radius:12px;padding:16px;margin-bottom:14px;color:#eee9f4}.tccc-panel-head{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:12px}.tccc-panel-head span{font-size:11px;line-height:1.35;color:#aaa2b3!important}',
-            '.tccc-brief-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.tccc-brief-grid button{display:flex;flex-direction:column;align-items:flex-start;text-align:left;min-height:105px;background:#19151e;border:1px solid #413747;border-radius:10px;padding:12px;cursor:pointer}.tccc-brief-grid button span{font-size:9px!important;letter-spacing:.65px;font-weight:900!important;color:#aaa2b3!important}.tccc-brief-grid button strong{font-size:16px!important;line-height:1.2;color:#f3edf7!important;margin-top:7px}.tccc-brief-grid button small{font-size:10px!important;line-height:1.35;color:#aaa2b3!important;margin-top:5px}.tccc-brief-grid button.ok{border-color:#315e46}.tccc-brief-grid button.warn{border-color:#725629}.tccc-brief-grid button.danger{border-color:#7e3948}.tccc-brief-grid button.info{border-color:#5d4780}.tccc-brief-grid button:hover{background:#211a29}.tccc-overview-trend,.tccc-analytics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-overview-trend>div,.tccc-analytics-grid>div{background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px 11px}.tccc-overview-trend span,.tccc-analytics-grid span{display:block;color:#aaa2b3!important;font-size:9px;text-transform:uppercase;letter-spacing:.45px;font-weight:800}.tccc-overview-trend strong,.tccc-analytics-grid strong{display:block;color:#f2edf6!important;font-size:14px;margin-top:5px}.tccc-star-history{display:flex;gap:8px;flex-wrap:wrap}.tccc-star-history>div{display:flex;flex-direction:column;min-width:130px;background:#19151e;border:1px solid #413747;border-radius:8px;padding:10px}.tccc-star-history span{font-size:9px;color:#aaa2b3!important}.tccc-star-history strong{font-size:18px;color:#c6a9ff!important;margin-top:3px}.tccc-star-history small{font-size:8px;color:#8f8798!important;margin-top:3px}',
+            '.tccc-brief-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.tccc-brief-grid button{display:flex;flex-direction:column;align-items:flex-start;text-align:left;min-height:105px;background:#19151e;border:1px solid #413747;border-radius:10px;padding:12px;cursor:pointer}.tccc-brief-grid button span{font-size:9px!important;letter-spacing:.65px;font-weight:900!important;color:#aaa2b3!important}.tccc-brief-grid button strong{font-size:16px!important;line-height:1.2;color:#f3edf7!important;margin-top:7px}.tccc-brief-grid button small{font-size:10px!important;line-height:1.35;color:#aaa2b3!important;margin-top:5px}.tccc-brief-grid button.ok{border-color:#315e46}.tccc-brief-grid button.warn{border-color:#725629}.tccc-brief-grid button.danger{border-color:#7e3948}.tccc-brief-grid button.info{border-color:#5d4780}.tccc-brief-grid button:hover{background:#211a29}.tccc-overview-trend,.tccc-analytics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-overview-trend>div,.tccc-analytics-grid>div{background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px 11px}.tccc-overview-trend span,.tccc-analytics-grid span{display:block;color:#aaa2b3!important;font-size:9px;text-transform:uppercase;letter-spacing:.45px;font-weight:800}.tccc-overview-trend strong,.tccc-analytics-grid strong{display:block;color:#f2edf6!important;font-size:14px;margin-top:5px}.tccc-star-history{display:flex;gap:8px;flex-wrap:wrap}.tccc-star-history>div{display:flex;flex-direction:column;min-width:130px;background:#19151e;border:1px solid #413747;border-radius:8px;padding:10px}.tccc-star-history span{font-size:9px;color:#aaa2b3!important}.tccc-star-history strong{font-size:18px;color:#c6a9ff!important;margin-top:3px}.tccc-star-history small{font-size:8px;color:#8f8798!important;margin-top:3px}.tccc-day-state{display:inline-block;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-day-state.live{background:#59421f;color:#f5c781!important}.tccc-day-state.complete{background:#204b34;color:#8ee3ae!important}.tccc-live-row td{background:rgba(245,199,129,.03)!important}.tccc-trend-waiting{grid-column:span 1}',
             '.tccc-attention{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}.tccc-attention button{display:flex;flex-direction:column;text-align:left;background:#18141d;border:1px solid #413747;border-radius:10px;padding:13px;color:#e7e1ed!important;cursor:pointer}.tccc-attention button:hover{border-color:#674f82;background:#1d1724}.tccc-attention strong{font-size:18px;line-height:1.15;color:#c2a4ff!important}.tccc-attention span{font-size:11px;line-height:1.35;margin-top:5px;color:#b0a8b8!important}',
             '.tccc-health{margin-top:12px}.tccc-health-row{margin-bottom:12px}.tccc-health-row>div:first-child{display:flex;justify-content:space-between;font-size:12px;line-height:1.3;color:#e8e2ed!important;margin-bottom:6px}.tccc-health-row b{color:#fff!important}.tccc-meter{height:8px;background:#151219;border-radius:99px;overflow:hidden}.tccc-meter span{display:block;height:100%;background:linear-gradient(90deg,#704bc0,#b394ff)}',
             '.tccc-note{font-size:11px;line-height:1.55;color:#b2aaba!important;padding:11px 13px;border-left:3px solid #7654bd;background:#19151e;border-radius:6px}.tccc-note strong{color:#e8dfff!important}',
