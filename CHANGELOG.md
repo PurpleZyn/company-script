@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.0 - 2026-09-23
+
+Director Dashboard and Analytics.
+
+### Added
+- New **Analytics** tab.
+- Stronger Overview with a live **Director Brief** covering finances, training, eDVD dues, employee penalties, stock risk, recruiting, staffing-plan alignment, and role-optimizer recommendations.
+- 7-day and 30-day analytics based on locally recorded TCT-day snapshots.
+- Average sales, operating profit, operating margin, advertising spend, revenue per advertising dollar, advertising burden, and adjusted cash movement.
+- Daily performance-history table.
+- Company star-history tracking.
+- Daily storage of efficiency, environment, popularity, available trains, employee count, and application count.
+- Historical average employee-effectiveness display when matching employee snapshots are available.
+- Overview shortcut into the Analytics tab.
+- Recorded-trend summary on the Overview.
+
+### Important history behavior
+The script is still local-first. Each TCT day reflects the last snapshot captured on that day. If the script was not refreshed late in the day, that day's sales/profit can be partial. The interface states this explicitly rather than presenting incomplete local history as exact full-day accounting.
+
 ## 0.8.1 - 2026-09-23
 
 Manager-aware role optimization.
