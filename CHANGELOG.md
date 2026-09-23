@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0 - 2026-09-23
+
+Finance system rebuild.
+
+### Added
+- Separate gross sales, estimated cost of goods sold, gross profit, operating overhead, and operating profit.
+- Gross-margin and operating-margin calculations.
+- Estimated break-even sales based on the current product-margin mix.
+- Company funds change since the first local capture of the current TCT day.
+- Profit bridge explaining how the operating-profit number is built.
+- Expanded daily history with sales, COGS, ads/wages, operating profit, company funds, and funds delta.
+- Company `funds` news feed on the Finance tab for future cash reconciliation.
+- Cross-check between Torn company income and summed item sales.
+
+### Changed
+- The main Overview now labels the headline as estimated operating profit instead of generic net profit.
+- Stock cost is treated as estimated cost of goods sold for profitability, separate from the timing of stock-order cash movement.
+- Deposits/withdrawals and company-vault changes are no longer conceptually mixed into operating profit.
+
+### Next
+- Parse the live funds-news wording to classify deposits, withdrawals, stock-related cash movements, and other transfers automatically.
+
 ## 0.1.2 - 2026-09-23
 
 Small visual fix.
