@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.3.0
+**Current version:** 0.4.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.3.0 does
+## What v0.4.0 does
 
 ### Overview
 - Current Torn-reported daily company revenue
@@ -71,11 +71,14 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Monthly employee ledger
 - Configurable number of eDVDs owed per month
 - Configurable due day
+- Configurable dues-message keywords (default: CHAP, DUES)
 - Director can be excluded
-- Paid/unpaid status with payment timestamp
+- Automatic scanning of direct Item Receive logs for Erotic DVD #366
+- Only current employees + matching keywords count toward dues
+- Multiple qualifying sends are accumulated toward the monthly requirement
+- Manual paid/unpaid overrides remain available
+- Optional separate Custom log-only API key
 - Stored locally between sessions
-
-Automatic eDVD receipt detection is planned after the exact live item/trade log patterns are validated.
 
 ### Stock
 - In-stock amount
