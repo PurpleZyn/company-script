@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.0 - 2026-09-23
+
+Recruiting and applicant dashboard.
+
+### Added
+- New Recruiting tab.
+- Live company staffing count and capacity.
+- Open-seat count.
+- Current application-open/closed status.
+- Current staffing mix by employee position.
+- Live company applications from Torn API v2.
+- Applicant level, manual labor, intelligence, endurance, and total work stats.
+- Application status, expiration countdown, message, and direct player profile link.
+- Expiring-within-24-hours warning.
+- Applicants sorted by expiration first.
+- Overview attention card for active applications.
+
+### Design choice
+Applicants are presented with raw role-relevant facts rather than a generic applicant score. A future update can add director-configured role targets for comparing applicants against the exact position being recruited.
+
 ## 0.6.0 - 2026-09-23
 
 Stock forecasting and reorder guidance.
