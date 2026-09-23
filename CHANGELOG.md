@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 - 2026-09-23
+
+Employee management expansion.
+
+### Added
+- Employee summary cards for average effectiveness, clear employees, addiction penalties, and inactivity penalties.
+- Issue-first sorting so employees with active penalties rise to the top.
+- Filters for All, Issues, Addiction, and Inactivity.
+- Expandable employee detail rows showing every effectiveness component returned by Torn.
+- Daily employee-history snapshots retained for 90 days.
+- Effectiveness trend delta compared with the most recent previous TCT day.
+- Expanded trend detail for effectiveness, addiction, and inactivity changes.
+- Employee-history data included in JSON backup/export and import.
+
+### Changed
+- The employee page is now a management dashboard instead of a static roster.
+- Effectiveness details are generated dynamically from Torn's returned fields, avoiding hard-coded assumptions about which modifiers are available.
+
 ## 0.4.0 - 2026-09-23
 
 Automatic eDVD dues scanner.
