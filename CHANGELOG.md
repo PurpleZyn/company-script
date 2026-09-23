@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.1 - 2026-09-23
+
+Cash-reconciliation pass.
+
+### Added
+- Automatic parsing of company-fund deposits and withdrawals.
+- Raw company-funds change since the day's first local capture.
+- External-transfer totals for deposits and withdrawals.
+- Adjusted cash change: raw vault change minus deposits plus withdrawals.
+- A visual cash-reconciliation equation on the Finance tab.
+- Deposit/withdrawal badges in the recent company fund activity table.
+- Expanded history columns for raw funds delta, external transfers, and adjusted cash delta.
+
+### Why this matters
+Player deposits and withdrawals are now treated as outside transfers rather than company profit or loss. Operating profit and adjusted cash movement can therefore be compared without director funding activity distorting the result.
+
+### Remaining limitation
+Stock-order timing can still make adjusted cash movement differ from operating profit. That difference will become more useful as multiple days of snapshots accumulate.
+
 ## 0.2.0 - 2026-09-23
 
 Finance system rebuild.
