@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 - 2026-09-23
+
+Employee role optimizer and applicant role-fit engine.
+
+### Added
+- Adult Novelties role-requirement catalog for Sales Assistant, Sexpert, Store Manager, Marketing Manager, Receptionist, Human Resources, and Cleaner.
+- Projected working-stat effectiveness calculator using Torn's documented/researched position-effectiveness behavior.
+- Automatic calibration against Torn's current employee Working Stats effectiveness values when available.
+- Constrained whole-company optimizer that maximizes projected working-stat effectiveness while preserving the director's saved staffing-plan counts.
+- Current projected lineup score, optimized projected score, projected gain, number of suggested position changes, and calibration multiplier.
+- Per-employee current role, current projected stat score, optimized role, optimized score, delta, and individual best planned role.
+- Optimizer handles the entire lineup together so multiple employees cannot all be assigned to the same limited slot.
+- All Adult Novelties roles are available in the staffing-plan editor, including roles currently set to zero.
+- Applicant table now shows each applicant's best role among positions currently enabled in the staffing plan plus the projected working-stat score for that role.
+
+### Design choice
+The optimizer recommends position changes but does not automatically modify Torn positions. It optimizes the working-stat component and keeps other effectiveness modifiers (addiction, inactivity, settled-in, merits, management, etc.) separate rather than pretending they are raw work stats.
+
 ## 0.7.1 - 2026-09-23
 
 Recruiting staffing-plan upgrade.
