@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.9.2
+**Current version:** 1.0.0
 
 ## Install
 
@@ -30,11 +30,19 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.9.0 does
+## What v1.0.0 does
 
 ### Overview
 - Director Brief combining finances, training, dues, employee issues, stock risk, recruiting, staffing, and role optimization
 - At-a-glance company rating, operating profit, sales, funds, and recorded trends
+
+### Launcher & alerts
+- Draggable COMPANY CC launcher with remembered position
+- Optional company-area-only launcher visibility
+- Attention badge for active management categories
+- Fresh/stale data indicator
+- Optional in-app alerts for training advances, eDVD payments, applications, low stock, and optimizer changes
+- Alerts establish a baseline on first run so existing events are not replayed as new
 
 ### Automatic refresh
 - Refreshes company data automatically while Torn is open (30 minutes by default)
@@ -130,33 +138,34 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 ### Local backup
 Settings (excluding the API key), financial snapshots, and eDVD records can be exported to JSON and imported later.
 
-## Interface notes
-
-The launcher currently appears across Torn so the dashboard remains accessible while traveling. A movable launcher and an option to limit it to company pages are planned after the core company-management features are validated.
-
 ## Current limitations
 
-This is the foundation release, not the final accounting engine.
+v1.0 is intentionally local-first.
 
-- Profit is currently an **operating estimate** rather than bank-account reconciliation.
-- Cost of goods sold is estimated as current sold quantity multiplied by Torn's reported item cost.
-- Historical snapshots are captured when the script is actually opened/refreshed.
-- Training matching currently uses the latest 100 training-news entries.
-- eDVD dues are manual in v0.1.0.
+- Profit remains an **operating estimate**, not formal accounting.
+- Cost of goods sold is estimated from Torn's reported sold quantities and item costs.
+- A completed historical day reflects the last snapshot captured on that TCT date. Auto-refresh and the 23:55 TCT capture greatly improve this, but the script cannot run while Torn/the browser is completely closed.
+- Training rotation detection uses the recent company training-news window.
+- Automatic eDVD dues detection currently watches direct Item Receive logs with the configured keyword rule.
+- Role optimization models Torn working-stat effectiveness and treats Store Manager specially, but it does not invent an exact hidden management-bonus formula.
+- The role catalog is currently tailored to Adult Novelties.
 
-These are intentionally visible rather than hidden so the dashboard never presents an estimate as exact accounting.
+These limitations are surfaced in the interface rather than hidden behind false precision.
 
-## Planned work
+## v2 possibility
 
-Near-term additions include automatic eDVD payment detection, stronger daily transaction reconciliation, training-cycle controls and skips, historical charts, recruiting/applicant tools, stock forecasting, alerts, and same-company-type benchmarking.
+If long-term usage shows that missing end-of-day captures or cross-device history are meaningful problems, a future v2 can add an optional hosted/always-on collector and central history sync. v1.0 does not require any server or hosting.
 
 ## Data sources
 
-The script currently uses Torn API v2:
+The script currently uses Torn API v2 data including:
 
 - `/company/profile`
 - `/company/employees`
 - `/company/stock`
+- `/company/applications`
 - `/company/news?cat=training`
+- `/company/news?cat=funds`
+- `/user/log` for optional eDVD Item Receive scanning
 
-No API key is hard-coded in this repository.
+No API key is hard-coded in this repository. API keys are excluded from exported backups.
