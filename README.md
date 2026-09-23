@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.9.1
+**Current version:** 0.9.2
 
 ## Install
 
@@ -35,6 +35,14 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 ### Overview
 - Director Brief combining finances, training, dues, employee issues, stock risk, recruiting, staffing, and role optimization
 - At-a-glance company rating, operating profit, sales, funds, and recorded trends
+
+### Automatic refresh
+- Refreshes company data automatically while Torn is open (30 minutes by default)
+- Configurable 15–120 minute interval
+- Refreshes after returning to Torn following an idle period
+- Captures a near-end-of-day snapshot around 23:55 TCT when possible
+- Detects TCT day rollover and starts the new day's snapshot automatically
+- Manual refresh remains available
 
 ### Analytics
 - Live current-day performance shown separately from completed-day history
