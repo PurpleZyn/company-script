@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.4.0
+**Current version:** 0.5.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.4.0 does
+## What v0.5.0 does
 
 ### Overview
 - Current Torn-reported daily company revenue
@@ -52,12 +52,13 @@ It also shows gross margin, operating margin, estimated break-even sales, raw co
 The dashboard stores a local daily snapshot whenever it refreshes, allowing a running history to build over time.
 
 ### Employees
-- Employee name and position
-- Total effectiveness
-- Addiction penalty
-- Inactivity penalty
-- Wage
-- Days in company
+- Employee name, position, wage, and company tenure
+- Total effectiveness plus every effectiveness modifier returned by Torn
+- Addiction and inactivity penalties highlighted
+- Issue-first sorting and filters for All / Issues / Addiction / Inactivity
+- Expandable employee detail rows
+- Daily employee-history snapshots retained for 90 days
+- Day-over-day effectiveness trend tracking
 - Direct profile links
 
 ### Training rotation
