@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.1.2
+// @version      0.2.0
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.1.2',
+        version: '0.2.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -35,6 +35,7 @@
         employees: [],
         stock: [],
         trainingNews: [],
+        fundNews: [],
         snapshots: {},
         dues: {},
         settings: {
@@ -217,6 +218,7 @@
 
     function financeSummary() {
         const revenue = num(state.profile && state.profile.income && state.profile.income.daily);
+        const weeklyRevenue = num(state.profile && state.profile.income && state.profile.income.weekly);
         const wages = state.employees.reduce(function (total, employee) {
             return total + num(employee.wage);
         }, 0);
@@ -224,16 +226,35 @@
         const cogs = state.stock.reduce(function (total, item) {
             return total + (num(item.sold_amount) * num(item.cost));
         }, 0);
+        const stockSales = state.stock.reduce(function (total, item) {
+            return total + num(item.sold_worth);
+        }, 0);
         const extra = num(state.settings.extraDailyCost);
-        const expenses = wages + advertising + cogs + extra;
+        const grossProfit = revenue - cogs;
+        const overhead = wages + advertising + extra;
+        const operatingProfit = grossProfit - overhead;
+        const expenses = cogs + overhead;
+        const grossMargin = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
+        const operatingMargin = revenue > 0 ? (operatingProfit / revenue) * 100 : 0;
+        const contributionRate = revenue > 0 ? grossProfit / revenue : 0;
+        const breakEvenRevenue = contributionRate > 0 ? overhead / contributionRate : 0;
+
         return {
             revenue: revenue,
+            weeklyRevenue: weeklyRevenue,
+            stockSales: stockSales,
             wages: wages,
             advertising: advertising,
             cogs: cogs,
             extra: extra,
+            grossProfit: grossProfit,
+            overhead: overhead,
             expenses: expenses,
-            net: revenue - expenses
+            operatingProfit: operatingProfit,
+            net: operatingProfit,
+            grossMargin: grossMargin,
+            operatingMargin: operatingMargin,
+            breakEvenRevenue: breakEvenRevenue
         };
     }
 
@@ -241,16 +262,27 @@
         if (!state.profile) return;
         const f = financeSummary();
         const key = tctDay();
+        const now = Math.floor(Date.now() / 1000);
+        const currentFunds = num(state.profile.funds);
+        const previous = state.snapshots[key] || {};
+
         state.snapshots[key] = {
-            capturedAt: Math.floor(Date.now() / 1000),
+            openingCapturedAt: previous.openingCapturedAt || previous.capturedAt || now,
+            openingFunds: previous.openingFunds !== undefined ? num(previous.openingFunds) :
+                (previous.funds !== undefined ? num(previous.funds) : currentFunds),
+            capturedAt: now,
             revenue: f.revenue,
+            weeklyRevenue: f.weeklyRevenue,
             wages: f.wages,
             advertising: f.advertising,
             cogs: f.cogs,
+            grossProfit: f.grossProfit,
+            overhead: f.overhead,
             extra: f.extra,
             expenses: f.expenses,
-            net: f.net,
-            funds: num(state.profile.funds),
+            operatingProfit: f.operatingProfit,
+            net: f.operatingProfit,
+            funds: currentFunds,
             rating: num(state.profile.rating)
         };
 
@@ -277,13 +309,15 @@
                 apiGet('/company/profile'),
                 apiGet('/company/employees'),
                 apiGet('/company/stock'),
-                apiGet('/company/news', { cat: 'training', limit: 100, sort: 'DESC' })
+                apiGet('/company/news', { cat: 'training', limit: 100, sort: 'DESC' }),
+                apiGet('/company/news', { cat: 'funds', limit: 100, sort: 'DESC' })
             ]);
 
             state.profile = results[0].profile || null;
             state.employees = Array.isArray(results[1].employees) ? results[1].employees : [];
             state.stock = Array.isArray(results[2].stock) ? results[2].stock : [];
             state.trainingNews = Array.isArray(results[3].news) ? results[3].news : [];
+            state.fundNews = Array.isArray(results[4].news) ? results[4].news : [];
             saveTodaySnapshot();
         } catch (e) {
             state.error = e && e.message ? e.message : String(e);
@@ -363,20 +397,20 @@
 
         let html = cards([
             {
-                label: 'Estimated Net Today',
-                value: money.format(f.net),
-                sub: 'Revenue minus tracked operating costs',
-                className: f.net >= 0 ? 'good' : 'bad'
+                label: 'Est. Operating Profit',
+                value: money.format(f.operatingProfit),
+                sub: 'After stock cost, ads, wages & manual costs',
+                className: f.operatingProfit >= 0 ? 'good' : 'bad'
             },
             {
-                label: 'Daily Revenue',
+                label: 'Gross Sales',
                 value: money.format(f.revenue),
-                sub: 'Torn-reported company income'
+                sub: 'Torn-reported daily company income'
             },
             {
-                label: 'Tracked Expenses',
-                value: money.format(f.expenses),
-                sub: 'Wages + ads + estimated COGS + manual costs'
+                label: 'Cost of Sales',
+                value: money.format(f.cogs),
+                sub: 'Units sold × Torn stock cost'
             },
             {
                 label: 'Company Funds',
@@ -401,7 +435,7 @@
         html += healthRow('Available trains', state.profile.trains, true);
         html += '</div></section></div>';
 
-        html += '<div class="tccc-note">Profit is currently an operating estimate: Torn revenue − wages − advertising − estimated stock cost of goods sold − your manual daily costs. We will tighten this further as transaction-level tracking is added.</div>';
+        html += '<div class="tccc-note">Operating profit is an accrual-style estimate: gross sales − estimated cost of goods sold − advertising − wages − manual daily costs. Company-fund transfers and stock-order cash timing are tracked separately so deposits/withdrawals are not mistaken for profit or loss.</div>';
         return html;
     }
 
@@ -412,34 +446,112 @@
             '<div class="tccc-meter"><span style="width:' + width + '%"></span></div></div>';
     }
 
+    function newsPlainText(html) {
+        const holder = document.createElement('div');
+        holder.innerHTML = html || '';
+        return (holder.textContent || holder.innerText || '').replace(/\\s+/g, ' ').trim();
+    }
+
     function financesHtml() {
         if (!state.profile) return emptyConnectHtml();
+
         const f = financeSummary();
         const history = Object.keys(state.snapshots).sort().reverse().slice(0, 14);
+        const today = state.snapshots[tctDay()] || {};
+        const fundsChange = num(today.funds) - num(today.openingFunds);
+        const stockMatchesRevenue = Math.abs(f.stockSales - f.revenue) <= 1;
 
         let html = cards([
-            { label: 'Revenue', value: money.format(f.revenue) },
-            { label: 'Employee Wages', value: money.format(f.wages) },
-            { label: 'Advertising', value: money.format(f.advertising) },
-            { label: 'Est. Stock Cost', value: money.format(f.cogs) },
-            { label: 'Manual Daily Costs', value: money.format(f.extra) },
-            { label: 'Estimated Net', value: money.format(f.net), className: f.net >= 0 ? 'good' : 'bad' }
+            {
+                label: 'Gross Sales',
+                value: money.format(f.revenue),
+                sub: stockMatchesRevenue ? 'Matches item sales reported by Torn' : 'Torn daily company income'
+            },
+            {
+                label: 'Est. COGS',
+                value: money.format(f.cogs),
+                sub: 'Units sold × stock cost'
+            },
+            {
+                label: 'Gross Profit',
+                value: money.format(f.grossProfit),
+                sub: f.grossMargin.toFixed(1) + '% gross margin',
+                className: f.grossProfit >= 0 ? 'good' : 'bad'
+            },
+            {
+                label: 'Advertising',
+                value: money.format(f.advertising),
+                sub: 'Current daily advertising budget'
+            },
+            {
+                label: 'Wages + Other',
+                value: money.format(f.wages + f.extra),
+                sub: money.format(f.wages) + ' wages + ' + money.format(f.extra) + ' manual'
+            },
+            {
+                label: 'Operating Profit',
+                value: money.format(f.operatingProfit),
+                sub: f.operatingMargin.toFixed(1) + '% operating margin',
+                className: f.operatingProfit >= 0 ? 'good' : 'bad'
+            },
+            {
+                label: 'Break-even Sales',
+                value: money.format(f.breakEvenRevenue),
+                sub: 'At today\'s product-margin mix'
+            },
+            {
+                label: 'Funds Change',
+                value: (fundsChange >= 0 ? '+' : '') + money.format(fundsChange),
+                sub: 'Since this device first captured today',
+                className: fundsChange >= 0 ? 'good' : 'bad'
+            }
         ]);
 
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Recent snapshots</h3><span>Saved locally whenever the script refreshes</span></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>TCT Day</th><th>Revenue</th><th>Expenses</th><th>Net</th><th>Funds</th></tr></thead><tbody>';
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Today\'s profit bridge</h3><span>Operating performance — not the same thing as bank/vault cash movement</span></div>';
+        html += '<div class="tccc-tablewrap"><table class="tccc-finance-bridge"><tbody>';
+        html += '<tr><td><strong>Gross sales</strong></td><td class="tccc-positive">' + esc(money.format(f.revenue)) + '</td><td>Revenue generated from today\'s item sales</td></tr>';
+        html += '<tr><td>Less: estimated cost of goods sold</td><td class="tccc-negative">−' + esc(money.format(f.cogs)) + '</td><td>Cost basis of the units actually sold today</td></tr>';
+        html += '<tr class="tccc-finance-subtotal"><td><strong>Gross profit</strong></td><td class="' + (f.grossProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '"><strong>' + esc(money.format(f.grossProfit)) + '</strong></td><td>' + esc(f.grossMargin.toFixed(1)) + '% gross margin</td></tr>';
+        html += '<tr><td>Less: advertising</td><td class="tccc-negative">−' + esc(money.format(f.advertising)) + '</td><td>Current daily ad budget</td></tr>';
+        html += '<tr><td>Less: employee wages</td><td class="' + (f.wages > 0 ? 'tccc-negative' : '') + '">' + (f.wages > 0 ? '−' : '') + esc(money.format(f.wages)) + '</td><td>Sum of employee daily wages</td></tr>';
+        html += '<tr><td>Less: manual daily costs</td><td class="' + (f.extra > 0 ? 'tccc-negative' : '') + '">' + (f.extra > 0 ? '−' : '') + esc(money.format(f.extra)) + '</td><td>Any additional cost you entered in Settings</td></tr>';
+        html += '<tr class="tccc-finance-total"><td><strong>Estimated operating profit</strong></td><td class="' + (f.operatingProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '"><strong>' + esc(money.format(f.operatingProfit)) + '</strong></td><td>' + esc(f.operatingMargin.toFixed(1)) + '% operating margin</td></tr>';
+        html += '</tbody></table></div></section>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Recent daily snapshots</h3><span>Latest value for each TCT day; opening funds preserved separately</span></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>TCT Day</th><th>Sales</th><th>COGS</th><th>Ads + Wages</th><th>Operating Profit</th><th>Funds</th><th>Funds Δ</th></tr></thead><tbody>';
         if (!history.length) {
-            html += '<tr><td colspan="5">No history yet.</td></tr>';
+            html += '<tr><td colspan="7">No history yet.</td></tr>';
         } else {
             history.forEach(function (day) {
                 const s = state.snapshots[day];
+                const op = s.operatingProfit !== undefined ? num(s.operatingProfit) : num(s.net);
+                const dayCogs = num(s.cogs);
+                const overhead = num(s.advertising) + num(s.wages);
+                const opening = s.openingFunds !== undefined ? num(s.openingFunds) : num(s.funds);
+                const delta = num(s.funds) - opening;
                 html += '<tr><td>' + esc(day) + '</td><td>' + esc(money.format(num(s.revenue))) + '</td><td>' +
-                    esc(money.format(num(s.expenses))) + '</td><td class="' + (num(s.net) >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' +
-                    esc(money.format(num(s.net))) + '</td><td>' + esc(money.format(num(s.funds))) + '</td></tr>';
+                    esc(money.format(dayCogs)) + '</td><td>' + esc(money.format(overhead)) + '</td><td class="' +
+                    (op >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(op)) + '</td><td>' +
+                    esc(money.format(num(s.funds))) + '</td><td class="' + (delta >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' +
+                    esc((delta >= 0 ? '+' : '') + money.format(delta)) + '</td></tr>';
             });
         }
         html += '</tbody></table></div></section>';
-        html += '<div class="tccc-note">The history is stored on this device. A later backend option can capture exact daily history even on days you never open Torn.</div>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>Recent company fund activity</h3><span>Raw Torn funds-news feed — useful for separating transfers from real profit/loss</span></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>When</th><th>Fund event</th></tr></thead><tbody>';
+        if (!state.fundNews.length) {
+            html += '<tr><td colspan="2">No recent fund-news entries were returned.</td></tr>';
+        } else {
+            state.fundNews.slice(0, 15).forEach(function (entry) {
+                html += '<tr><td>' + esc(formatDate(entry.timestamp)) + '</td><td class="tccc-news-text">' +
+                    esc(newsPlainText(entry.text)) + '</td></tr>';
+            });
+        }
+        html += '</tbody></table></div></section>';
+
+        html += '<div class="tccc-note"><strong>Why two numbers?</strong> Operating profit measures whether the company\'s sales covered the cost of sold stock, advertising, wages, and other daily costs. Funds change measures what happened to the company vault on this device since its first capture today. Deposits, withdrawals, and the timing of stock orders can make those two numbers different. The fund-news feed above is the next piece we will use to reconcile that difference automatically.</div>';
         return html;
     }
 
@@ -738,7 +850,8 @@
             '.tccc-grid2{display:grid;grid-template-columns:1.25fr 1fr;gap:14px}.tccc-panel{background:#231e2a;border:1px solid #44394d;border-radius:12px;padding:16px;margin-bottom:14px;color:#eee9f4}.tccc-panel-head{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:12px}.tccc-panel-head span{font-size:11px;line-height:1.35;color:#aaa2b3!important}',
             '.tccc-attention{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}.tccc-attention button{display:flex;flex-direction:column;text-align:left;background:#18141d;border:1px solid #413747;border-radius:10px;padding:13px;color:#e7e1ed!important;cursor:pointer}.tccc-attention button:hover{border-color:#674f82;background:#1d1724}.tccc-attention strong{font-size:18px;line-height:1.15;color:#c2a4ff!important}.tccc-attention span{font-size:11px;line-height:1.35;margin-top:5px;color:#b0a8b8!important}',
             '.tccc-health{margin-top:12px}.tccc-health-row{margin-bottom:12px}.tccc-health-row>div:first-child{display:flex;justify-content:space-between;font-size:12px;line-height:1.3;color:#e8e2ed!important;margin-bottom:6px}.tccc-health-row b{color:#fff!important}.tccc-meter{height:8px;background:#151219;border-radius:99px;overflow:hidden}.tccc-meter span{display:block;height:100%;background:linear-gradient(90deg,#704bc0,#b394ff)}',
-            '.tccc-note{font-size:11px;line-height:1.55;color:#b2aaba!important;padding:11px 13px;border-left:3px solid #7654bd;background:#19151e;border-radius:6px}',
+            '.tccc-note{font-size:11px;line-height:1.55;color:#b2aaba!important;padding:11px 13px;border-left:3px solid #7654bd;background:#19151e;border-radius:6px}.tccc-note strong{color:#e8dfff!important}',
+            '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
             '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}',
             '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}',
