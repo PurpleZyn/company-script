@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 - 2026-09-23
+
+Automatic eDVD dues scanner.
+
+### Added
+- Automatic scan of current-month Torn Item Receive logs (log type 4103).
+- Erotic DVD detection using item ID 366.
+- Keyword-gated payment recognition using configurable message keywords (default: CHAP, DUES).
+- Employee validation so sends from non-employees do not count as company dues.
+- Quantity aggregation across multiple qualifying sends from the same employee.
+- Automatic paid status once the configured monthly eDVD requirement is reached.
+- Detected eDVD progress column (for example 1 / 2 eDVD).
+- Optional separate dues-scanner API key so the primary company key can remain Limited.
+- Scanner status showing ACTIVE or NEEDS LOG KEY.
+- Manual paid/unpaid overrides with a RETURN TO AUTO control.
+- Manual Scan now button.
+
+### Security
+The recommended setup is a separate Custom Torn API key granting only User -> Log access restricted to Item receive (4103). API keys are excluded from exported backups.
+
+### Current scope
+Automatic recognition currently watches direct item sends. Trades and other possible transfer methods are not treated as dues unless their logs are added in a future update.
+
 ## 0.3.0 - 2026-09-23
 
 Training rotation manager.
