@@ -449,7 +449,7 @@
     function newsPlainText(html) {
         const holder = document.createElement('div');
         holder.innerHTML = html || '';
-        return (holder.textContent || holder.innerText || '').replace(/\\s+/g, ' ').trim();
+        return (holder.textContent || holder.innerText || '').replace(/\s+/g, ' ').trim();
     }
 
     function financesHtml() {
