@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 - 2026-09-23
+
+Training rotation manager.
+
+### Added
+- Persistent employee training queue stored locally.
+- Initial queue seeding based on oldest detected training time.
+- Automatic queue advancement when Torn detects a new train for an employee.
+- New employees are added to the queue automatically.
+- Manual **NEXT**, **up**, **down**, and **SKIP** controls.
+- "Reset from history" option to rebuild the queue if it ever gets out of sync.
+- Rotation activity log showing automatic train detections, manual skips, and resets.
+- Training summary showing queue size, available trains, last auto-advance, and rotation mode.
+- Rotation data is included in JSON backup/export and import.
+
+### Changed
+- The Overview "Next in training rotation" card now uses the persistent queue rather than recalculating oldest-first on every render.
+- Training news matching now prefers Torn profile IDs found in the news HTML before falling back to employee-name matching.
+
+### Behavior
+The first time v0.3.0 sees the company, it uses the existing Torn training history to create the starting order without pretending those old events just happened. From then on, newly detected trains move the trained employee to the back of the line automatically.
+
 ## 0.2.1 - 2026-09-23
 
 Cash-reconciliation pass.
