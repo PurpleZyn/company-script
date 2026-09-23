@@ -1268,7 +1268,86 @@
                 className: seven.avgProfit >= 0 ? 'good' : 'bad'
             },
             {
-                label: 'Revenue / Ad 
+                label: 'Revenue / Ad Dollar',
+                value: seven.revenuePerAdDollar ? seven.revenuePerAdDollar.toFixed(2) + '×' : '—',
+                sub: seven.adBurden.toFixed(1) + '% of recorded sales spent on ads'
+            },
+            {
+                label: 'Current Stars',
+                value: currentRating + '★',
+                sub: (ratingDelta >= 0 ? '+' : '') + ratingDelta + ' across recorded history'
+            },
+            {
+                label: '30d Op. Profit',
+                value: money.format(thirty.totalProfit),
+                sub: thirty.days + ' recorded day' + (thirty.days === 1 ? '' : 's'),
+                className: thirty.totalProfit >= 0 ? 'good' : 'bad'
+            }
+        ]);
+
+        html += '<div class="tccc-grid2">';
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>7-day performance</h3><span>Uses up to the latest 7 locally captured TCT days</span></div></div><div class="tccc-analytics-grid">';
+        html += '<div><span>Total sales</span><strong>' + esc(money.format(seven.totalRevenue)) + '</strong></div>';
+        html += '<div><span>Total operating profit</span><strong class="' + (seven.totalProfit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(seven.totalProfit)) + '</strong></div>';
+        html += '<div><span>Average operating margin</span><strong class="' + (seven.avgMargin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(seven.avgMargin.toFixed(1) + '%') + '</strong></div>';
+        html += '<div><span>Advertising spend</span><strong>' + esc(money.format(seven.totalAds)) + '</strong></div>';
+        html += '<div><span>Revenue per ad dollar</span><strong>' + (seven.revenuePerAdDollar ? esc(seven.revenuePerAdDollar.toFixed(2) + '×') : '—') + '</strong></div>';
+        html += '<div><span>Adjusted cash movement</span><strong class="' + (seven.adjustedCash >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc((seven.adjustedCash >= 0 ? '+' : '') + money.format(seven.adjustedCash)) + '</strong></div>';
+        html += '</div></section>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Company health now</h3><span>Current Torn company metrics</span></div></div><div class="tccc-health">';
+        html += healthRow('Efficiency', state.profile.efficiency);
+        html += healthRow('Environment', state.profile.environment);
+        html += healthRow('Popularity', state.profile.popularity);
+        html += healthRow('Available trains', state.profile.trains, true);
+        html += '</div></section></div>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Daily performance history</h3><span>Last refresh captured for each TCT day</span></div></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>TCT Day</th><th>Sales</th><th>Operating Profit</th><th>Margin</th><th>Advertising</th><th>Ad Burden</th><th>Adjusted Cash Δ</th><th>Stars</th><th>Avg Employee Eff.</th><th>Eff.</th><th>Env.</th><th>Pop.</th></tr></thead><tbody>';
+
+        if (!allDays.length) {
+            html += '<tr><td colspan="12">No analytics history yet.</td></tr>';
+        } else {
+            allDays.slice(0, 30).forEach(function (day) {
+                const snapshot = state.snapshots[day] || {};
+                const revenue = num(snapshot.revenue);
+                const profit = snapshotOperatingProfit(snapshot);
+                const margin = snapshotOperatingMargin(snapshot);
+                const ad = num(snapshot.advertising);
+                const adBurden = revenue > 0 ? (ad / revenue) * 100 : 0;
+                const adjusted = snapshot.adjustedCashChange !== undefined ? num(snapshot.adjustedCashChange) : 0;
+                const employeeAverage = averageEmployeeEffectivenessForDay(day);
+
+                html += '<tr><td>' + esc(day) + '</td><td>' + esc(money.format(revenue)) + '</td><td class="' +
+                    (profit >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(money.format(profit)) + '</td><td class="' +
+                    (margin >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc(margin.toFixed(1) + '%') + '</td><td>' +
+                    esc(money.format(ad)) + '</td><td>' + esc(adBurden.toFixed(1) + '%') + '</td><td class="' +
+                    (adjusted >= 0 ? 'tccc-positive' : 'tccc-negative') + '">' + esc((adjusted >= 0 ? '+' : '') + money.format(adjusted)) + '</td><td>' +
+                    esc(num(snapshot.rating)) + '★</td><td>' + (employeeAverage === null ? '—' : esc(employeeAverage.toFixed(1))) + '</td><td>' +
+                    (snapshot.efficiency === undefined ? '—' : esc(num(snapshot.efficiency) + '%')) + '</td><td>' +
+                    (snapshot.environment === undefined ? '—' : esc(num(snapshot.environment) + '%')) + '</td><td>' +
+                    (snapshot.popularity === undefined ? '—' : esc(num(snapshot.popularity) + '%')) + '</td></tr>';
+            });
+        }
+
+        html += '</tbody></table></div></section>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Star history</h3><span>Records rating changes observed by the script</span></div></div><div class="tccc-star-history">';
+        if (!ratingHistory.length) {
+            html += '<div class="tccc-training-log-empty">No star history recorded yet.</div>';
+        } else {
+            ratingHistory.slice().reverse().forEach(function (entry, index) {
+                html += '<div><span>' + esc(entry.day) + '</span><strong>' + esc(entry.rating) + '★</strong>' +
+                    (index === 0 ? '<small>current/latest recorded</small>' : '') + '</div>';
+            });
+        }
+        html += '</div></section>';
+
+        html += '<div class="tccc-note"><strong>History caveat:</strong> this script is local-first. Each TCT day stores the latest values seen when you refreshed/opened the dashboard that day. If the final refresh happened before the day was finished, sales/profit for that historical day may be partial. Analytics become more representative as more completed-day snapshots accumulate.</div>';
+        return html;
+    }
+
+    function cards(items) {
         return '<div class="tccc-cards">' + items.map(function (item) {
             return '<div class="tccc-card ' + (item.className || '') + '">' +
                 '<div class="tccc-card-label">' + esc(item.label) + '</div>' +
