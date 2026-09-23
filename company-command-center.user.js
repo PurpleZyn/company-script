@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.3.0
+// @version      0.4.0
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.3.0',
+        version: '0.4.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -38,6 +38,13 @@
         fundNews: [],
         snapshots: {},
         dues: {},
+        duesScan: {
+            status: 'idle',
+            error: '',
+            logs: [],
+            matches: [],
+            checkedAt: 0
+        },
         trainingRotation: {
             initialized: false,
             order: [],
@@ -47,6 +54,8 @@
         },
         settings: {
             apiKey: '',
+            duesApiKey: '',
+            duesKeywords: 'CHAP,DUES',
             edvdQty: 1,
             dueDay: 1,
             excludeDirector: true,
@@ -81,6 +90,35 @@
 
     function currentMonth() {
         return new Date().toISOString().slice(0, 7);
+    }
+
+    function monthStartTimestamp(month) {
+        const parts = String(month || currentMonth()).split('-');
+        const year = num(parts[0]);
+        const monthIndex = Math.max(0, num(parts[1]) - 1);
+        return Math.floor(Date.UTC(year, monthIndex, 1, 0, 0, 0) / 1000);
+    }
+
+    function duesKeywords() {
+        return String(state.settings.duesKeywords || 'CHAP,DUES')
+            .split(',')
+            .map(function (keyword) { return keyword.trim(); })
+            .filter(Boolean);
+    }
+
+    function escapeRegExp(value) {
+        return String(value).replace(/[.*+?^$()|[\]\\{}]/g, '\\    function currentMonth() {
+        return new Date().toISOString().slice(0, 7);
+    }
+');
+    }
+
+    function messageMatchesDuesKeyword(message) {
+        const text = String(message || '');
+        return duesKeywords().some(function (keyword) {
+            const pattern = new RegExp('(?:^|\\b)' + escapeRegExp(keyword) + '(?:\\b|$)', 'i');
+            return pattern.test(text);
+        });
     }
 
     function formatDate(timestamp) {
@@ -159,9 +197,10 @@
         store.set('trainingRotation', state.trainingRotation);
     }
 
-    function apiGet(path, params) {
+    function apiGet(path, params, keyOverride) {
         params = params || {};
-        if (!state.settings.apiKey) return Promise.reject(new Error('Add your Torn API key in Settings first.'));
+        const apiKey = String(keyOverride || state.settings.apiKey || '').trim();
+        if (!apiKey) return Promise.reject(new Error('Add your Torn API key in Settings first.'));
 
         const query = new URLSearchParams();
         Object.keys(params).forEach(function (key) {
@@ -169,7 +208,7 @@
                 query.set(key, params[key]);
             }
         });
-        query.set('key', state.settings.apiKey.trim());
+        query.set('key', apiKey);
         query.set('comment', APP.comment);
 
         const url = APP.apiBase + path + '?' + query.toString();
@@ -612,12 +651,173 @@
             state.trainingNews = Array.isArray(results[3].news) ? results[3].news : [];
             state.fundNews = Array.isArray(results[4].news) ? results[4].news : [];
             syncTrainingRotation();
+            await scanDuesLogs();
             saveTodaySnapshot();
         } catch (e) {
             state.error = e && e.message ? e.message : String(e);
         } finally {
             state.loading = false;
             render();
+        }
+    }
+
+    function itemQuantityFromLog(items, itemId) {
+        if (!items) return 0;
+        const wanted = String(itemId);
+
+        if (Array.isArray(items)) {
+            return items.reduce(function (total, item) {
+                if (!item || typeof item !== 'object') return total;
+                const id = item.id !== undefined ? item.id : (item.item_id !== undefined ? item.item_id : item.item);
+                if (String(id) !== wanted) return total;
+                return total + num(item.quantity !== undefined ? item.quantity :
+                    (item.qty !== undefined ? item.qty : (item.amount !== undefined ? item.amount : 0)));
+            }, 0);
+        }
+
+        if (typeof items === 'object') {
+            if (Object.prototype.hasOwnProperty.call(items, wanted)) {
+                const direct = items[wanted];
+                if (Array.isArray(direct)) return num(direct[0]);
+                if (direct && typeof direct === 'object') {
+                    return num(direct.quantity !== undefined ? direct.quantity :
+                        (direct.qty !== undefined ? direct.qty : (direct.amount !== undefined ? direct.amount : 0)));
+                }
+                return num(direct);
+            }
+
+            return Object.keys(items).reduce(function (total, key) {
+                const item = items[key];
+                if (!item || typeof item !== 'object' || Array.isArray(item)) return total;
+                const id = item.id !== undefined ? item.id : (item.item_id !== undefined ? item.item_id : item.item);
+                if (String(id) !== wanted) return total;
+                return total + num(item.quantity !== undefined ? item.quantity :
+                    (item.qty !== undefined ? item.qty : (item.amount !== undefined ? item.amount : 0)));
+            }, 0);
+        }
+
+        return 0;
+    }
+
+    function clearDueOverride(employeeId) {
+        const ledger = monthLedger(currentMonth());
+        const key = String(employeeId);
+        const record = ledger[key] || {};
+        delete record.manualOverride;
+        ledger[key] = record;
+        saveDues();
+        applyAutomaticDuesMatches(state.duesScan.logs || []);
+        render();
+    }
+
+    function applyAutomaticDuesMatches(logs) {
+        const month = currentMonth();
+        const ledger = monthLedger(month);
+        const employeeIds = new Set(duesEmployees().map(function (employee) { return String(employee.id); }));
+        const aggregates = {};
+
+        (logs || []).forEach(function (entry) {
+            const details = entry && entry.details ? entry.details : {};
+            if (num(details.id) !== 4103 && String(details.title || '').toLowerCase() !== 'item receive') return;
+
+            const data = entry.data || {};
+            const senderId = String(data.sender !== undefined ? data.sender :
+                (data.sender_id !== undefined ? data.sender_id : ''));
+            if (!employeeIds.has(senderId)) return;
+
+            const quantity = itemQuantityFromLog(data.items, 366);
+            if (quantity <= 0) return;
+
+            const message = data.message || '';
+            if (!messageMatchesDuesKeyword(message)) return;
+
+            if (!aggregates[senderId]) {
+                aggregates[senderId] = {
+                    quantity: 0,
+                    latest: 0,
+                    messages: [],
+                    logIds: []
+                };
+            }
+
+            aggregates[senderId].quantity += quantity;
+            aggregates[senderId].latest = Math.max(aggregates[senderId].latest, num(entry.timestamp));
+            aggregates[senderId].messages.push(String(message || ''));
+            aggregates[senderId].logIds.push(String(entry.id || ''));
+        });
+
+        const required = Math.max(1, num(state.settings.edvdQty) || 1);
+        state.duesScan.matches = [];
+
+        duesEmployees().forEach(function (employee) {
+            const key = String(employee.id);
+            const aggregate = aggregates[key] || { quantity: 0, latest: 0, messages: [], logIds: [] };
+            const existing = ledger[key] || {};
+            existing.receivedQty = aggregate.quantity;
+            existing.detectedLogs = aggregate.logIds;
+            existing.detectedMessages = aggregate.messages;
+
+            if (existing.manualOverride === 'paid') {
+                existing.paid = true;
+            } else if (existing.manualOverride === 'unpaid') {
+                existing.paid = false;
+            } else if (aggregate.quantity >= required) {
+                existing.paid = true;
+                existing.paidAt = aggregate.latest || existing.paidAt || Math.floor(Date.now() / 1000);
+                existing.method = 'AUTO · ' + aggregate.quantity + ' eDVD · ' + duesKeywords().join('/');
+                existing.auto = true;
+            } else if (existing.auto) {
+                existing.paid = false;
+                existing.paidAt = null;
+                existing.method = '';
+                existing.auto = false;
+            }
+
+            if (aggregate.quantity > 0) {
+                state.duesScan.matches.push({
+                    employeeId: key,
+                    employeeName: employee.name,
+                    quantity: aggregate.quantity,
+                    paid: aggregate.quantity >= required,
+                    timestamp: aggregate.latest
+                });
+            }
+
+            ledger[key] = existing;
+        });
+
+        saveDues();
+    }
+
+    async function scanDuesLogs() {
+        state.duesScan.status = 'checking';
+        state.duesScan.error = '';
+
+        const scanKey = String(state.settings.duesApiKey || state.settings.apiKey || '').trim();
+        if (!scanKey) {
+            state.duesScan.status = 'locked';
+            state.duesScan.error = 'No API key is available for the dues scanner.';
+            return;
+        }
+
+        try {
+            const data = await apiGet('/user/log', {
+                log: 4103,
+                from: monthStartTimestamp(currentMonth()),
+                limit: 100
+            }, scanKey);
+
+            state.duesScan.logs = Array.isArray(data.log) ? data.log : [];
+            state.duesScan.checkedAt = Math.floor(Date.now() / 1000);
+            state.duesScan.status = 'ready';
+            state.duesScan.error = '';
+            applyAutomaticDuesMatches(state.duesScan.logs);
+        } catch (error) {
+            state.duesScan.logs = [];
+            state.duesScan.matches = [];
+            state.duesScan.checkedAt = Math.floor(Date.now() / 1000);
+            state.duesScan.status = 'locked';
+            state.duesScan.error = error && error.message ? error.message : String(error);
         }
     }
 
@@ -641,15 +841,26 @@
         const month = currentMonth();
         const ledger = monthLedger(month);
         const key = String(employeeId);
-        if (ledger[key] && ledger[key].paid) {
-            ledger[key] = { paid: false, paidAt: null, method: '' };
+        const existing = ledger[key] || {};
+
+        if (existing.paid) {
+            ledger[key] = Object.assign({}, existing, {
+                paid: false,
+                paidAt: null,
+                method: 'Manual override: unpaid',
+                manualOverride: 'unpaid',
+                auto: false
+            });
         } else {
-            ledger[key] = {
+            ledger[key] = Object.assign({}, existing, {
                 paid: true,
                 paidAt: Math.floor(Date.now() / 1000),
-                method: state.settings.edvdQty + ' eDVD'
-            };
+                method: 'Manual payment',
+                manualOverride: 'paid',
+                auto: false
+            });
         }
+
         saveDues();
         render();
     }
@@ -984,26 +1195,55 @@
         const paidCount = employees.filter(function (e) {
             return ledger[String(e.id)] && ledger[String(e.id)].paid;
         }).length;
+        const autoMatched = employees.filter(function (e) {
+            return num(ledger[String(e.id)] && ledger[String(e.id)].receivedQty) > 0;
+        }).length;
+
+        let scanLabel = 'Checking…';
+        let scanClass = '';
+        if (state.duesScan.status === 'ready') {
+            scanLabel = 'ACTIVE';
+            scanClass = 'good';
+        } else if (state.duesScan.status === 'locked') {
+            scanLabel = 'NEEDS LOG KEY';
+            scanClass = 'bad';
+        } else if (state.duesScan.status === 'idle') {
+            scanLabel = 'NOT CHECKED';
+        }
 
         let html = cards([
             { label: 'Month', value: month },
             { label: 'Paid', value: paidCount + ' / ' + employees.length, className: paidCount === employees.length ? 'good' : '' },
             { label: 'Monthly Requirement', value: state.settings.edvdQty + ' eDVD' },
-            { label: 'Due Day', value: 'Day ' + state.settings.dueDay }
+            { label: 'Auto Scanner', value: scanLabel, sub: autoMatched + ' employee payment' + (autoMatched === 1 ? '' : 's') + ' detected', className: scanClass }
         ]);
 
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><h3>eDVD dues</h3><span>Click a status to toggle paid/unpaid</span></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Employee</th><th>Status</th><th>Paid at</th><th>Method</th></tr></thead><tbody>';
+        if (state.duesScan.status === 'ready') {
+            html += '<div class="tccc-dues-status ready"><strong>Automatic dues scanning is active.</strong><span>Direct Item Receive logs for Erotic DVD #366 are counted only when the sender is a current employee and the message contains one of these keywords: <b>' +
+                esc(duesKeywords().join(', ')) + '</b>.</span></div>';
+        } else if (state.duesScan.status === 'locked') {
+            html += '<div class="tccc-dues-status locked"><strong>Automatic scanning needs additional API permission.</strong><span>Your normal company dashboard can keep using its current key. For dues, add an optional Custom API key in Settings with access to <b>User → Log</b>, restricted to the <b>Item receive (4103)</b> log type. Current scanner response: ' +
+                esc(state.duesScan.error || 'log access unavailable') + '</span></div>';
+        }
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>eDVD dues</h3><span>Automatic matches + manual overrides</span></div><button id="tccc-scan-dues" class="tccc-small-action">Scan now</button></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Employee</th><th>Status</th><th>Detected</th><th>Paid at</th><th>Method</th><th>Control</th></tr></thead><tbody>';
 
         employees.forEach(function (e) {
             const record = ledger[String(e.id)] || {};
-            html += '<tr><td>' + esc(e.name) + '</td><td><button class="tccc-duebtn ' + (record.paid ? 'paid' : 'unpaid') +
-                '" data-due="' + esc(e.id) + '">' + (record.paid ? 'PAID' : 'UNPAID') + '</button></td><td>' +
-                esc(record.paidAt ? formatDate(record.paidAt) : '—') + '</td><td>' + esc(record.method || '—') + '</td></tr>';
+            const detected = num(record.receivedQty);
+            const hasOverride = !!record.manualOverride;
+            html += '<tr><td><strong>' + esc(e.name) + '</strong></td><td><button class="tccc-duebtn ' + (record.paid ? 'paid' : 'unpaid') +
+                '" data-due="' + esc(e.id) + '">' + (record.paid ? 'PAID' : 'UNPAID') + '</button></td><td class="' +
+                (detected >= num(state.settings.edvdQty) && detected > 0 ? 'tccc-positive' : '') + '">' +
+                esc(detected + ' / ' + state.settings.edvdQty + ' eDVD') + '</td><td>' +
+                esc(record.paidAt ? formatDate(record.paidAt) : '—') + '</td><td>' + esc(record.method || '—') + '</td><td>' +
+                (hasOverride ? '<button class="tccc-auto-reset" data-due-auto="' + esc(e.id) + '">RETURN TO AUTO</button>' : '<span class="tccc-auto-label">' + (record.auto ? 'AUTO' : '—') + '</span>') +
+                '</td></tr>';
         });
 
         html += '</tbody></table></div></section>';
-        html += '<div class="tccc-note">This ledger works now and is saved locally. Automatic detection from your item/trade logs is planned once we validate the exact eDVD receipt log patterns against live data.</div>';
+        html += '<div class="tccc-note"><strong>Payment rule:</strong> The scanner currently watches direct item sends received during the current TCT month. A payment only counts if it came from a current employee, contains Erotic DVD #366, and its send-message contains one of your configured dues keywords. Multiple qualifying sends from the same employee are added together. Clicking PAID/UNPAID creates a manual override; “Return to auto” hands that employee back to the scanner.</div>';
         return html;
     }
 
@@ -1030,16 +1270,21 @@
     function settingsHtml() {
         return '<section class="tccc-panel tccc-settings">' +
             '<h3>Connection & company rules</h3>' +
-            '<label>Torn API key <input id="tccc-api-key" type="password" value="' + esc(state.settings.apiKey) + '" placeholder="Limited or Custom key recommended"></label>' +
+            '<label>Primary Torn API key <input id="tccc-api-key" type="password" value="' + esc(state.settings.apiKey) + '" placeholder="Limited or suitably scoped Custom key"></label>' +
             '<div class="tccc-settings-grid">' +
             '<label>eDVDs per employee / month <input id="tccc-edvd-qty" type="number" min="0" step="1" value="' + esc(state.settings.edvdQty) + '"></label>' +
             '<label>Monthly due day <input id="tccc-due-day" type="number" min="1" max="28" step="1" value="' + esc(state.settings.dueDay) + '"></label>' +
+            '<label>Dues message keywords <input id="tccc-dues-keywords" type="text" value="' + esc(state.settings.duesKeywords) + '" placeholder="CHAP,DUES"></label>' +
             '<label>Other daily company cost <input id="tccc-extra-cost" type="number" min="0" step="1000" value="' + esc(state.settings.extraDailyCost) + '"></label>' +
             '<label class="tccc-check"><input id="tccc-exclude-director" type="checkbox" ' + (state.settings.excludeDirector ? 'checked' : '') + '> Exclude director from monthly eDVD dues</label>' +
             '</div>' +
+            '<div class="tccc-settings-divider"></div>' +
+            '<h3>Automatic eDVD scanner</h3>' +
+            '<label>Optional dues log API key <input id="tccc-dues-api-key" type="password" value="' + esc(state.settings.duesApiKey) + '" placeholder="Custom key: User → Log → Item receive (4103)"></label>' +
+            '<div class="tccc-note"><strong>Recommended security setup:</strong> Keep your normal company key as-is. Create a separate Custom Torn key for this field that grants only User → Log access restricted to Item receive (4103). If this field is blank, the scanner will try your primary key.</div>' +
             '<div class="tccc-setting-actions"><button id="tccc-save-settings" class="primary">Save & Refresh</button><button id="tccc-export">Export local data</button><button id="tccc-import">Import local data</button></div>' +
             '<input id="tccc-import-file" type="file" accept=".json,application/json" style="display:none">' +
-            '<div class="tccc-note">Your API key is stored by the userscript manager when available and is sent only to api.torn.com. Do not put your API key in GitHub.</div>' +
+            '<div class="tccc-note">API keys are stored by the userscript manager when available and are sent only to api.torn.com. API keys are never included in exported backups or committed to GitHub.</div>' +
             '</section>';
     }
 
@@ -1120,6 +1365,20 @@
             });
         });
 
+        document.querySelectorAll('[data-due-auto]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                clearDueOverride(button.getAttribute('data-due-auto'));
+            });
+        });
+
+        const scanDues = document.getElementById('tccc-scan-dues');
+        if (scanDues) scanDues.addEventListener('click', async function () {
+            state.duesScan.status = 'checking';
+            render();
+            await scanDuesLogs();
+            render();
+        });
+
         document.querySelectorAll('[data-train-action]').forEach(function (button) {
             button.addEventListener('click', function () {
                 const action = button.getAttribute('data-train-action');
@@ -1137,6 +1396,8 @@
         const save = document.getElementById('tccc-save-settings');
         if (save) save.addEventListener('click', function () {
             state.settings.apiKey = (document.getElementById('tccc-api-key').value || '').trim();
+            state.settings.duesApiKey = (document.getElementById('tccc-dues-api-key').value || '').trim();
+            state.settings.duesKeywords = (document.getElementById('tccc-dues-keywords').value || 'CHAP,DUES').trim();
             state.settings.edvdQty = Math.max(0, num(document.getElementById('tccc-edvd-qty').value));
             state.settings.dueDay = Math.min(28, Math.max(1, num(document.getElementById('tccc-due-day').value) || 1));
             state.settings.extraDailyCost = Math.max(0, num(document.getElementById('tccc-extra-cost').value));
@@ -1159,7 +1420,7 @@
             app: APP.name,
             version: APP.version,
             exportedAt: new Date().toISOString(),
-            settings: Object.assign({}, state.settings, { apiKey: '' }),
+            settings: Object.assign({}, state.settings, { apiKey: '', duesApiKey: '' }),
             snapshots: state.snapshots,
             dues: state.dues,
             trainingRotation: state.trainingRotation
@@ -1186,7 +1447,11 @@
                 if (payload.trainingRotation) state.trainingRotation = Object.assign({}, state.trainingRotation, payload.trainingRotation);
                 if (payload.settings) {
                     const currentKey = state.settings.apiKey;
-                    state.settings = Object.assign({}, state.settings, payload.settings, { apiKey: currentKey });
+                    const currentDuesKey = state.settings.duesApiKey;
+                    state.settings = Object.assign({}, state.settings, payload.settings, {
+                        apiKey: currentKey,
+                        duesApiKey: currentDuesKey
+                    });
                 }
                 saveSnapshots();
                 saveDues();
@@ -1235,8 +1500,8 @@
             '.tccc-finance-bridge td:nth-child(2){text-align:right!important;font-variant-numeric:tabular-nums}.tccc-finance-bridge td:nth-child(3){color:#aca3b5!important;white-space:normal!important}.tccc-finance-subtotal td{border-top:1px solid #59496a!important}.tccc-finance-total td{border-top:2px solid #7654bd!important;background:rgba(118,84,189,.08)!important}.tccc-news-text{white-space:normal!important;min-width:420px}.tccc-fund-badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:9px!important;font-weight:900!important;letter-spacing:.5px}.tccc-fund-badge.deposit{background:#1f4b34;color:#8fe0ae!important}.tccc-fund-badge.withdrawal{background:#582630;color:#ff9aa7!important}.tccc-fund-badge.other{background:#3a3341;color:#c4bbc9!important}.tccc-cash-equation{display:grid;grid-template-columns:minmax(150px,1fr) auto minmax(130px,1fr) auto minmax(130px,1fr) auto minmax(170px,1.2fr);gap:10px;align-items:stretch}.tccc-cash-equation>div{display:flex;flex-direction:column;justify-content:center;gap:5px;background:#19151e;border:1px solid #403649;border-radius:9px;padding:12px}.tccc-cash-equation>div.result{border-color:#7654bd;background:rgba(118,84,189,.08)}.tccc-cash-equation>div span{font-size:10px;color:#aaa2b3!important;text-transform:uppercase;font-weight:800;letter-spacing:.5px}.tccc-cash-equation>div strong{font-size:16px;color:#f4f0f8!important}.tccc-cash-equation>b{display:flex;align-items:center;color:#a58fbe!important;font-size:19px}',
             '.tccc-tablewrap{overflow:auto!important;max-height:none!important;height:auto!important;border-radius:8px}.tccc-modal table{width:100%!important;border-collapse:separate!important;border-spacing:0!important;font-size:13px!important;line-height:1.35!important;color:#eee9f4!important;background:transparent!important}.tccc-modal thead,.tccc-modal tbody,.tccc-modal tr{background:transparent!important}.tccc-modal th{text-align:left!important;color:#bbb3c4!important;background:#1b1720!important;font-size:10px!important;line-height:1.2!important;text-transform:uppercase!important;letter-spacing:.7px!important;font-weight:800!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #4a3e53!important;white-space:nowrap}.tccc-modal td{color:#e6e0eb!important;background:transparent!important;font-size:13px!important;line-height:1.35!important;padding:10px 11px!important;border:0!important;border-bottom:1px solid #372f3e!important;white-space:nowrap}.tccc-modal tbody tr:nth-child(even) td{background:rgba(255,255,255,.018)!important}.tccc-modal tbody tr:hover td{background:rgba(139,92,246,.08)!important}.tccc-modal td a{color:#c3a5ff!important;text-decoration:none!important;font-weight:700}.tccc-modal td a:hover{text-decoration:underline!important}.tccc-modal .tccc-positive,.tccc-modal td.tccc-positive{color:#79d69f!important;font-weight:800!important}.tccc-modal .tccc-negative,.tccc-modal td.tccc-negative{color:#ff7688!important;font-weight:800!important}.tccc-nextrow td{background:#302342!important}',
             '.tccc-next{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#3d2865,#251d35);border:1px solid #7a5aaa;border-radius:12px;padding:17px 18px;margin-bottom:14px;color:#f3eef7}.tccc-next span{display:block;font-size:10px;line-height:1.2;text-transform:uppercase;color:#c1ace0!important;font-weight:800}.tccc-next strong{display:block;font-size:23px;line-height:1.15;color:#fff!important;margin-top:4px}.tccc-training-next small{display:block;margin-top:7px;color:#c0b4cc!important;font-size:11px}.tccc-next-meta{text-align:right}.tccc-next-meta strong{font-size:20px!important}.tccc-training-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.tccc-training-summary>div{background:#211b29;border:1px solid #43384d;border-radius:10px;padding:12px 13px}.tccc-training-summary span{display:block;color:#aaa1b2!important;font-size:9px;text-transform:uppercase;letter-spacing:.65px;font-weight:800}.tccc-training-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:5px}.tccc-training-head{align-items:flex-start}.tccc-training-head>div span{display:block;margin-top:4px}.tccc-small-action{border:1px solid #564568;background:#2b2334;color:#e8dff0!important;border-radius:8px;padding:8px 10px;font-size:10px!important;font-weight:800!important;cursor:pointer;white-space:nowrap}.tccc-small-action:hover{border-color:#7c5fb0;background:#33273f}.tccc-queue-actions{display:flex;gap:5px;align-items:center}.tccc-queue-actions button{border:1px solid #4b4054;background:#241e2b;color:#d9d1df!important;border-radius:6px;min-width:30px;height:28px;padding:0 7px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-queue-actions button:hover:not(:disabled){background:#3b2a50;border-color:#7654bd;color:#fff!important}.tccc-queue-actions button:disabled{opacity:.28;cursor:not-allowed}.tccc-queue-actions button[data-train-action="next"]{color:#c6a9ff!important}.tccc-queue-actions button[data-train-action="skip"]{color:#f2bf7b!important}.tccc-training-log{display:flex;flex-direction:column;gap:7px}.tccc-training-log-row{display:grid;grid-template-columns:90px minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #39313f;border-radius:8px;background:#1a161f}.tccc-training-log-row>div{min-width:0}.tccc-training-log-row strong{display:block;color:#eee8f4!important;font-size:12px}.tccc-training-log-row>div span{display:block;color:#aaa2b2!important;font-size:10px;margin-top:2px}.tccc-training-log-row time{color:#918999!important;font-size:10px;white-space:nowrap}.tccc-rotation-badge{display:inline-block;text-align:center;border-radius:999px;padding:4px 7px;font-size:8px!important;font-weight:900!important;letter-spacing:.5px}.tccc-rotation-badge.auto{background:#1f4b34;color:#8fe0ae!important}.tccc-rotation-badge.skip{background:#5a4021;color:#f5c781!important}.tccc-rotation-badge.reset{background:#3b304a;color:#cbb6e7!important}.tccc-training-log-empty{color:#aaa2b2!important;font-size:11px;padding:8px 2px}',
-            '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}',
-            '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
+            '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}.tccc-dues-status{display:flex;gap:8px;flex-direction:column;border:1px solid #44394d;border-radius:10px;padding:12px 14px;margin-bottom:14px}.tccc-dues-status strong{font-size:12px!important}.tccc-dues-status span{font-size:11px!important;line-height:1.5;color:#b9b0c1!important}.tccc-dues-status.ready{background:#17251d;border-color:#315e46}.tccc-dues-status.ready strong{color:#8fe0ae!important}.tccc-dues-status.locked{background:#2a2023;border-color:#70404a}.tccc-dues-status.locked strong{color:#ff9aa7!important}.tccc-auto-reset{border:1px solid #604d70;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 7px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-auto-label{font-size:9px;color:#83d6a5!important;font-weight:900}.tccc-settings-divider{height:1px;background:#44394d;margin:20px 0}',
+            '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number],.tccc-settings input[type=text]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
             '.tccc-empty{text-align:center;padding:70px 20px;color:#eee8f4}.tccc-empty p{color:#b3aabb!important;max-width:560px;margin:12px auto 18px;line-height:1.55}',
             '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-modal main{padding:10px}}',
             '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
