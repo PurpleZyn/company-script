@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.1 - 2026-09-23
+
+Recruiting staffing-plan upgrade.
+
+### Added
+- Configurable target headcount for each current company position.
+- Live current-vs-target comparison.
+- SHORT / ON TARGET / OVER staffing indicators.
+- Recruiting summary showing total positions short and over target.
+- Staffing targets persist locally and are included in JSON backup/export and import.
+- Save-plan control directly on the Recruiting tab.
+
+### Behavior
+The first time this version loads, each position target is initialized to the current headcount so nothing is falsely flagged. From there, the director can edit the desired staffing mix and the dashboard will track differences even when the company is already at full capacity.
+
 ## 0.7.0 - 2026-09-23
 
 Recruiting and applicant dashboard.
