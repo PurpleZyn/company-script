@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.1 - 2026-09-23
+
+Readability and layout polish after first live-company test.
+
+### Changed
+- Separated the "TORN COMPANY COMMAND CENTER" eyebrow from the company name with an explicit title block.
+- Increased header spacing and set fixed line-height/title styling so Torn's page CSS cannot collapse the two lines together.
+- Increased secondary-text contrast throughout cards, notes, health metrics, and settings.
+- Explicitly styled table text colors to prevent Torn's global styles from making rows difficult to read.
+- Increased table body size, row padding, header contrast, zebra striping, and hover highlighting.
+- Improved panel/card borders and contrast.
+- Improved navigation, buttons, inputs, and mobile sizing.
+- Added stronger CSS isolation for common Torn style collisions.
+
+### Deferred
+- Movable COMPANY CC launcher.
+- Option to show the launcher only on Torn company pages.
+
 ## 0.1.0 - 2026-09-23
 
 Initial Company Command Center foundation.
