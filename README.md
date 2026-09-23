@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 0.2.1
+**Current version:** 0.3.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v0.2.0 does
+## What v0.3.0 does
 
 ### Overview
 - Current Torn-reported daily company revenue
@@ -61,9 +61,11 @@ The dashboard stores a local daily snapshot whenever it refreshes, allowing a ru
 - Direct profile links
 
 ### Training rotation
-The script reads the latest company news from Torn's **training** category and builds a rotation based on who was trained least recently.
+The script now maintains a persistent queue rather than recalculating the order from scratch.
 
-Employees with no detected train in the available recent-news window rise to the top.
+On first setup, employees are seeded oldest-trained first using Torn's **training** company news. After that, when a new train is detected for an employee, that employee is automatically moved to the back of the queue.
+
+The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to override the queue. A rotation activity log records automatic advances and manual skips, and "Reset from history" can rebuild the order if needed.
 
 ### eDVD dues
 - Monthly employee ledger
