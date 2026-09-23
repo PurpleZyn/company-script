@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.1 - 2026-09-23
+
+Manager-aware role optimization.
+
+### Fixed
+- Corrected a modeling gap where the optimizer treated Store Manager like an ordinary production role.
+- Store Manager selection now considers projected total effectiveness before the Management bonus, not only raw working-stat effectiveness.
+- The remaining non-manager slots are still optimized by working-stat effectiveness under the saved staffing-plan constraints.
+- The optimizer now labels “Raw Stat Best” explicitly so that value is not confused with the whole-company assignment recommendation.
+
+### Added
+- Recommended Manager callout.
+- Projected Manager effectiveness before Torn's management bonus.
+- Manager work-stat score shown separately.
+
+### Why
+Torn's Store Manager is a special Manager position whose effect scales with the employee's effectiveness. This matters when two people have similar role stats but very different merits, addiction, settled-in, or other effectiveness modifiers.
+
+The displayed projected gain remains the working-stat component only; the script does not invent an exact hidden Management-bonus formula.
+
 ## 0.8.0 - 2026-09-23
 
 Employee role optimizer and applicant role-fit engine.
