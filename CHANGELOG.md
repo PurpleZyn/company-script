@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 - 2026-09-23
+
+Stock forecasting and reorder guidance.
+
+### Added
+- Daily per-item stock history retained for up to 90 days.
+- 7-day average daily sales forecast once completed TCT days are available.
+- Temporary fallback to today's sold amount until historical daily data exists.
+- Projected on-hand cover and total cover including stock already on order.
+- Projected run-out date.
+- Suggested reorder quantity to reach a configurable stock-cover target.
+- LOW / WATCH / HEALTHY / NO SALES stock status badges.
+- Stock summary cards for low-stock items, watch-list items, average projected cover, suggested reorder units, and history depth.
+- Configurable stock target days and low-stock warning days in Settings.
+- Overview low-stock warning now uses the forecasting system instead of a simple same-day ratio.
+- Stock history included in JSON backup/export and import.
+
+### Forecast behavior
+Once at least one completed TCT day exists, the script uses up to the most recent seven completed daily snapshots to estimate average sales pace. Until then, it uses the current day's sold amount as a provisional pace. Suggested reorders account for both inventory on hand and stock already on order.
+
 ## 0.5.1 - 2026-09-23
 
 eDVD dues reset control.
