@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      0.9.1
+// @version      0.9.2
 // @description  Director dashboard for Torn companies: finances, employees, training rotation, eDVD dues, stock, and history.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '0.9.1',
+        version: '0.9.2',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -43,6 +43,8 @@
         activeTab: 'overview',
         loading: false,
         error: '',
+        lastRefreshAt: 0,
+        lastRefreshReason: '',
         profile: null,
         employees: [],
         stock: [],
@@ -80,9 +82,15 @@
             excludeDirector: true,
             extraDailyCost: 0,
             stockTargetDays: 7,
-            stockWarningDays: 3
+            stockWarningDays: 3,
+            autoRefreshEnabled: true,
+            autoRefreshMinutes: 30
         }
     };
+
+    let autoRefreshTimer = null;
+    let autoRuntimeDay = tctDay();
+    let preMidnightCapturedDay = '';
 
     const money = new Intl.NumberFormat('en-US', {
         style: 'currency',
@@ -845,7 +853,92 @@
         saveSnapshots();
     }
 
-    async function refreshData() {
+    function autoRefreshIntervalMs() {
+        const minutes = Math.max(15, Math.min(120, num(state.settings.autoRefreshMinutes) || 30));
+        return minutes * 60 * 1000;
+    }
+
+    function refreshAgeLabel() {
+        if (!state.lastRefreshAt) return 'not yet';
+        const seconds = Math.max(0, Math.floor(Date.now() / 1000) - state.lastRefreshAt);
+        if (seconds < 60) return 'just now';
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return minutes + 'm ago';
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return hours + 'h ago';
+        return Math.floor(hours / 24) + 'd ago';
+    }
+
+    function autoRefreshStatusText() {
+        if (!state.settings.autoRefreshEnabled) return 'Auto-refresh OFF';
+        return 'Auto-refresh ON · ' + Math.max(15, Math.min(120, num(state.settings.autoRefreshMinutes) || 30)) +
+            'm · last ' + refreshAgeLabel();
+    }
+
+    function shouldRefreshAfterReturn() {
+        if (!state.lastRefreshAt) return true;
+        const returnThreshold = Math.min(autoRefreshIntervalMs(), 10 * 60 * 1000);
+        return (Date.now() - (state.lastRefreshAt * 1000)) >= returnThreshold;
+    }
+
+    function autoRefreshTick() {
+        if (!state.settings.autoRefreshEnabled || !state.settings.apiKey || state.loading) return;
+
+        const currentDay = tctDay();
+        const now = new Date();
+
+        if (currentDay !== autoRuntimeDay) {
+            autoRuntimeDay = currentDay;
+            preMidnightCapturedDay = '';
+            refreshData('new-tct-day');
+            return;
+        }
+
+        // When Torn is open near TCT reset, capture a near-end-of-day snapshot once.
+        if (now.getUTCHours() === 23 && now.getUTCMinutes() >= 55 && preMidnightCapturedDay !== currentDay) {
+            preMidnightCapturedDay = currentDay;
+            refreshData('end-of-day-snapshot');
+            return;
+        }
+
+        if (!state.lastRefreshAt || (Date.now() - (state.lastRefreshAt * 1000)) >= autoRefreshIntervalMs()) {
+            refreshData('auto-interval');
+        }
+    }
+
+    function refreshOnReturn() {
+        if (document.visibilityState && document.visibilityState !== 'visible') return;
+        if (!state.settings.autoRefreshEnabled || !state.settings.apiKey || state.loading) return;
+
+        const currentDay = tctDay();
+        if (currentDay !== autoRuntimeDay) {
+            autoRuntimeDay = currentDay;
+            preMidnightCapturedDay = '';
+            refreshData('return-new-day');
+            return;
+        }
+
+        if (shouldRefreshAfterReturn()) refreshData('return-to-torn');
+    }
+
+    function startAutoRefresh() {
+        if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+        autoRuntimeDay = tctDay();
+
+        // A one-minute heartbeat handles interval due checks and TCT day rollover.
+        autoRefreshTimer = setInterval(autoRefreshTick, 60 * 1000);
+
+        document.removeEventListener('visibilitychange', refreshOnReturn);
+        document.addEventListener('visibilitychange', refreshOnReturn);
+        window.removeEventListener('focus', refreshOnReturn);
+        window.addEventListener('focus', refreshOnReturn);
+
+        if (state.settings.autoRefreshEnabled && state.settings.apiKey && !state.loading) {
+            refreshData('startup');
+        }
+    }
+
+    async function refreshData(reason) {
         if (!state.settings.apiKey) {
             state.error = 'Add your Torn API key in Settings to connect the dashboard.';
             render();
@@ -877,6 +970,9 @@
             saveEmployeeSnapshot();
             saveStockSnapshot();
             saveTodaySnapshot();
+            state.lastRefreshAt = Math.floor(Date.now() / 1000);
+            state.lastRefreshReason = typeof reason === 'string' ? reason : 'manual';
+            autoRuntimeDay = tctDay();
         } catch (e) {
             state.error = e && e.message ? e.message : String(e);
         } finally {
@@ -2530,6 +2626,13 @@
             '<label class="tccc-check"><input id="tccc-exclude-director" type="checkbox" ' + (state.settings.excludeDirector ? 'checked' : '') + '> Exclude director from monthly eDVD dues</label>' +
             '</div>' +
             '<div class="tccc-settings-divider"></div>' +
+            '<h3>Automatic refresh & history</h3>' +
+            '<div class="tccc-settings-grid">' +
+            '<label class="tccc-check"><input id="tccc-auto-refresh-enabled" type="checkbox" ' + (state.settings.autoRefreshEnabled ? 'checked' : '') + '> Automatically refresh while Torn is open</label>' +
+            '<label>Refresh interval (minutes) <input id="tccc-auto-refresh-minutes" type="number" min="15" max="120" step="5" value="' + esc(state.settings.autoRefreshMinutes) + '"></label>' +
+            '</div>' +
+            '<div class="tccc-note"><strong>Automatic history capture:</strong> while Torn is open, the script refreshes on your chosen interval, refreshes when you return after it has been idle for about 10 minutes, takes one near-end-of-day snapshot around 23:55 TCT, and refreshes again when a new TCT day is detected. If Torn/the browser is closed, the userscript cannot run until you open Torn again.</div>' +
+            '<div class="tccc-settings-divider"></div>' +
             '<h3>Automatic eDVD scanner</h3>' +
             '<label>Optional dues log API key <input id="tccc-dues-api-key" type="password" value="' + esc(state.settings.duesApiKey) + '" placeholder="Custom key: User → Log → Item receive (4103)"></label>' +
             '<div class="tccc-note"><strong>Recommended security setup:</strong> Keep your normal company key as-is. Create a separate Custom Torn key for this field that grants only User → Log access restricted to Item receive (4103). If this field is blank, the scanner will try your primary key.</div>' +
@@ -2579,7 +2682,7 @@
             (state.error ? '<div class="tccc-error">' + esc(state.error) + '</div>' : '') +
             (state.loading ? '<div class="tccc-loading">Refreshing Torn company data…</div>' : '') +
             '<main>' + tabHtml() + '</main>' +
-            '<footer><span>v' + esc(APP.version) + '</span><span>Local-first company management</span></footer>' +
+            '<footer><span>v' + esc(APP.version) + '</span><span>' + esc(autoRefreshStatusText()) + '</span><span>Local-first company management</span></footer>' +
             '</div>';
     }
 
@@ -2598,7 +2701,7 @@
         if (close) close.addEventListener('click', function () { state.open = false; render(); });
 
         const refresh = document.getElementById('tccc-refresh');
-        if (refresh) refresh.addEventListener('click', refreshData);
+        if (refresh) refresh.addEventListener('click', function () { refreshData('manual'); });
 
         document.querySelectorAll('[data-tab]').forEach(function (button) {
             button.addEventListener('click', function () {
@@ -2679,9 +2782,12 @@
             state.settings.extraDailyCost = Math.max(0, num(document.getElementById('tccc-extra-cost').value));
             state.settings.stockTargetDays = Math.max(1, num(document.getElementById('tccc-stock-target-days').value) || 7);
             state.settings.stockWarningDays = Math.max(0, num(document.getElementById('tccc-stock-warning-days').value));
+            state.settings.autoRefreshEnabled = !!document.getElementById('tccc-auto-refresh-enabled').checked;
+            state.settings.autoRefreshMinutes = Math.max(15, Math.min(120, num(document.getElementById('tccc-auto-refresh-minutes').value) || 30));
             state.settings.excludeDirector = !!document.getElementById('tccc-exclude-director').checked;
             saveSettings();
-            refreshData();
+            startAutoRefresh();
+            refreshData('settings-save');
         });
 
         const exportBtn = document.getElementById('tccc-export');
@@ -2776,7 +2882,7 @@
             '.tccc-modal nav button{white-space:nowrap;border:0;background:transparent;color:#bbb3c4!important;padding:10px 12px;border-radius:8px;font-size:13px!important;line-height:1.1!important;font-weight:700!important;cursor:pointer}',
             '.tccc-modal nav button:hover{background:#211b29;color:#f3eff8!important}.tccc-modal nav button.active{background:#7449c8;color:#fff!important}',
             '.tccc-modal main{padding:20px;min-height:430px;color:#eee9f4}',
-            '.tccc-modal footer{padding:10px 18px;border-top:1px solid #382f41;display:flex;justify-content:space-between;color:#9c94a6!important;font-size:11px;line-height:1.3}',
+            '.tccc-modal footer{padding:10px 18px;border-top:1px solid #382f41;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:#9c94a6!important;font-size:11px;line-height:1.3}',
             '.tccc-error{margin:14px 18px 0;padding:11px 13px;background:#3a1820;border:1px solid #6c2b38;border-radius:9px;color:#ffb6c0;font-weight:700}',
             '.tccc-loading{height:3px;background:linear-gradient(90deg,#6d48be,#b496ff,#6d48be);background-size:200% 100%;animation:tccc-load 1.2s linear infinite}@keyframes tccc-load{to{background-position:-200% 0}}',
             '.tccc-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}',
@@ -2813,7 +2919,7 @@
         launch.addEventListener('click', function () {
             state.open = true;
             render();
-            if (state.settings.apiKey && !state.profile && !state.loading) refreshData();
+            if (state.settings.apiKey && !state.profile && !state.loading) refreshData('open-dashboard');
         });
 
         const overlay = document.createElement('div');
@@ -2831,6 +2937,7 @@
 
     loadLocalState();
     mount();
+    startAutoRefresh();
 
     // Torn is a SPA in several areas. Re-mount if page navigation replaces body content.
     const observer = new MutationObserver(function () {
