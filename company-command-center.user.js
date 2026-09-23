@@ -921,7 +921,7 @@
         if (shouldRefreshAfterReturn()) refreshData('return-to-torn');
     }
 
-    function startAutoRefresh() {
+    function startAutoRefresh(runImmediately) {
         if (autoRefreshTimer) clearInterval(autoRefreshTimer);
         autoRuntimeDay = tctDay();
 
@@ -933,12 +933,13 @@
         window.removeEventListener('focus', refreshOnReturn);
         window.addEventListener('focus', refreshOnReturn);
 
-        if (state.settings.autoRefreshEnabled && state.settings.apiKey && !state.loading) {
+        if (runImmediately && state.settings.autoRefreshEnabled && state.settings.apiKey && !state.loading) {
             refreshData('startup');
         }
     }
 
     async function refreshData(reason) {
+        if (state.loading) return;
         if (!state.settings.apiKey) {
             state.error = 'Add your Torn API key in Settings to connect the dashboard.';
             render();
@@ -2786,7 +2787,7 @@
             state.settings.autoRefreshMinutes = Math.max(15, Math.min(120, num(document.getElementById('tccc-auto-refresh-minutes').value) || 30));
             state.settings.excludeDirector = !!document.getElementById('tccc-exclude-director').checked;
             saveSettings();
-            startAutoRefresh();
+            startAutoRefresh(false);
             refreshData('settings-save');
         });
 
@@ -2937,7 +2938,7 @@
 
     loadLocalState();
     mount();
-    startAutoRefresh();
+    startAutoRefresh(true);
 
     // Torn is a SPA in several areas. Re-mount if page navigation replaces body content.
     const observer = new MutationObserver(function () {
