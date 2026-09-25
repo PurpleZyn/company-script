@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      1.0.0
+// @version      1.0.1
 // @description  Complete local-first director dashboard for Torn companies: finances, staff, training, dues, stock, recruiting, optimization, alerts, and analytics.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '1.0.0',
+        version: '1.0.1',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -92,6 +92,7 @@
             extraDailyCost: 0,
             stockTargetDays: 7,
             stockWarningDays: 3,
+            stockCapacity: 500000,
             autoRefreshEnabled: true,
             autoRefreshMinutes: 30,
             launcherCompanyOnly: false,
@@ -665,7 +666,7 @@
         const totalDays = avgDaily > 0 ? totalAvailable / avgDaily : Infinity;
         const targetDays = Math.max(1, num(state.settings.stockTargetDays) || 7);
         const warningDays = Math.max(0, num(state.settings.stockWarningDays) || 3);
-        const suggested = avgDaily > 0 ? Math.max(0, Math.ceil((avgDaily * targetDays) - totalAvailable)) : 0;
+        const idealSuggested = avgDaily > 0 ? Math.max(0, Math.ceil((avgDaily * targetDays) - totalAvailable)) : 0;
         const runoutAt = Number.isFinite(totalDays) ?
             Math.floor(Date.now() / 1000) + Math.round(totalDays * 86400) : 0;
 
@@ -677,13 +678,139 @@
         return {
             avgDaily: avgDaily,
             samples: samples.length,
+            inStock: inStock,
+            onOrder: onOrder,
+            totalAvailable: totalAvailable,
             onHandDays: onHandDays,
             totalDays: totalDays,
             targetDays: targetDays,
             warningDays: warningDays,
-            suggested: suggested,
+            idealSuggested: idealSuggested,
+            suggested: idealSuggested,
             runoutAt: runoutAt,
             status: status
+        };
+    }
+
+    function stockCapacityPlan() {
+        const capacity = Math.max(1, Math.floor(num(state.settings.stockCapacity) || 500000));
+        const targetDays = Math.max(1, num(state.settings.stockTargetDays) || 7);
+        const warningDays = Math.max(0, num(state.settings.stockWarningDays) || 3);
+
+        const rows = state.stock.map(function (item) {
+            return {
+                key: stockItemKey(item),
+                item: item,
+                forecast: stockForecast(item),
+                suggested: 0,
+                afterPlanDays: Infinity,
+                status: 'healthy'
+            };
+        });
+
+        const inStockUnits = rows.reduce(function (total, row) {
+            return total + num(row.item.in_stock);
+        }, 0);
+        const onOrderUnits = rows.reduce(function (total, row) {
+            return total + num(row.item.on_order);
+        }, 0);
+        const committedUnits = inStockUnits + onOrderUnits;
+        const freeCapacity = Math.max(0, capacity - committedUnits);
+        const overCapacity = Math.max(0, committedUnits - capacity);
+        const idealNeeded = rows.reduce(function (total, row) {
+            return total + num(row.forecast.idealSuggested);
+        }, 0);
+
+        const activeRows = rows.filter(function (row) {
+            return row.forecast.avgDaily > 0;
+        });
+
+        function unitsNeededForCoverage(days) {
+            return activeRows.reduce(function (total, row) {
+                return total + Math.max(0, (row.forecast.avgDaily * days) - row.forecast.totalAvailable);
+            }, 0);
+        }
+
+        let effectiveTargetDays = targetDays;
+
+        if (activeRows.length && freeCapacity < idealNeeded) {
+            let low = 0;
+            let high = targetDays;
+
+            for (let i = 0; i < 50; i += 1) {
+                const mid = (low + high) / 2;
+                if (unitsNeededForCoverage(mid) <= freeCapacity) low = mid;
+                else high = mid;
+            }
+            effectiveTargetDays = low;
+        }
+
+        if (freeCapacity > 0 && activeRows.length) {
+            if (freeCapacity >= idealNeeded) {
+                rows.forEach(function (row) {
+                    row.suggested = row.forecast.idealSuggested;
+                });
+            } else {
+                rows.forEach(function (row) {
+                    if (row.forecast.avgDaily <= 0) return;
+                    row.suggested = Math.max(0, Math.floor(
+                        (row.forecast.avgDaily * effectiveTargetDays) - row.forecast.totalAvailable
+                    ));
+                });
+
+                let used = rows.reduce(function (total, row) { return total + row.suggested; }, 0);
+                let remaining = Math.max(0, freeCapacity - used);
+
+                const candidates = rows.filter(function (row) {
+                    return row.forecast.avgDaily > 0 && row.suggested < row.forecast.idealSuggested;
+                }).sort(function (a, b) {
+                    const aDays = (a.forecast.totalAvailable + a.suggested) / a.forecast.avgDaily;
+                    const bDays = (b.forecast.totalAvailable + b.suggested) / b.forecast.avgDaily;
+                    return aDays - bDays;
+                });
+
+                let cursor = 0;
+                while (remaining > 0 && candidates.length) {
+                    const row = candidates[cursor % candidates.length];
+                    if (row.suggested < row.forecast.idealSuggested) {
+                        row.suggested += 1;
+                        remaining -= 1;
+                    }
+                    cursor += 1;
+                    if (cursor > candidates.length * 3 && candidates.every(function (entry) {
+                        return entry.suggested >= entry.forecast.idealSuggested;
+                    })) break;
+                }
+            }
+        }
+
+        rows.forEach(function (row) {
+            const avgDaily = row.forecast.avgDaily;
+            const afterUnits = row.forecast.totalAvailable + row.suggested;
+            row.afterPlanDays = avgDaily > 0 ? afterUnits / avgDaily : Infinity;
+
+            if (avgDaily <= 0) row.status = 'no-sales';
+            else if (row.forecast.totalDays < warningDays) row.status = 'low';
+            else if (row.forecast.totalDays < effectiveTargetDays) row.status = 'watch';
+            else row.status = 'healthy';
+        });
+
+        const suggestedTotal = rows.reduce(function (total, row) {
+            return total + row.suggested;
+        }, 0);
+
+        return {
+            capacity: capacity,
+            inStockUnits: inStockUnits,
+            onOrderUnits: onOrderUnits,
+            committedUnits: committedUnits,
+            freeCapacity: freeCapacity,
+            overCapacity: overCapacity,
+            targetDays: targetDays,
+            effectiveTargetDays: effectiveTargetDays,
+            idealNeeded: idealNeeded,
+            suggestedTotal: suggestedTotal,
+            rows: rows
         };
     }
 
@@ -928,11 +1055,11 @@
         });
         if (employeeWarnings) items.push('Employees');
 
-        const riskyStock = state.stock.some(function (item) {
-            const status = stockForecast(item).status;
-            return status === 'low' || status === 'watch';
+        const stockPlan = stockCapacityPlan();
+        const riskyStock = stockPlan.rows.some(function (row) {
+            return row.status === 'low' || row.status === 'watch';
         });
-        if (riskyStock) items.push('Stock');
+        if (riskyStock || stockPlan.overCapacity > 0) items.push('Stock');
 
         if (state.applications.length) items.push('Recruiting');
 
@@ -976,9 +1103,10 @@
         }).map(function (employee) { return String(employee.id); }).sort();
 
         const applications = state.applications.map(applicationAlertId).sort();
-        const lowStock = state.stock.filter(function (item) {
-            return stockForecast(item).status === 'low';
-        }).map(stockItemKey).sort();
+        const stockPlan = stockCapacityPlan();
+        const lowStock = stockPlan.rows.filter(function (row) {
+            return row.status === 'low';
+        }).map(function (row) { return row.key; }).sort();
 
         const latestAuto = state.trainingRotation.history.find(function (event) {
             return event.type === 'auto';
@@ -1805,11 +1933,9 @@
             return num(eff.addiction) < 0 || num(eff.inactivity) < 0;
         });
 
-        const forecasts = state.stock.map(function (item) {
-            return stockForecast(item);
-        });
-        const lowStockCount = forecasts.filter(function (forecast) { return forecast.status === 'low'; }).length;
-        const watchStockCount = forecasts.filter(function (forecast) { return forecast.status === 'watch'; }).length;
+        const stockPlan = stockCapacityPlan();
+        const lowStockCount = stockPlan.rows.filter(function (row) { return row.status === 'low'; }).length;
+        const watchStockCount = stockPlan.rows.filter(function (row) { return row.status === 'watch'; }).length;
         const staffing = staffingPlanSummary();
         const optimizer = currentOptimizerSummary();
         const historyDepth = recordedSnapshotDays().length;
@@ -1854,7 +1980,8 @@
             esc(warningEmployees.length) + ' issue' + (warningEmployees.length === 1 ? '' : 's') + '</strong><small>Addiction / inactivity penalties</small></button>';
 
         html += '<button data-tabgo="stock" class="' + (lowStockCount ? 'danger' : (watchStockCount ? 'warn' : 'ok')) + '"><span>STOCK</span><strong>' +
-            esc(lowStockCount) + ' low · ' + esc(watchStockCount) + ' watch</strong><small>Forecast-based stock coverage</small></button>';
+            esc(lowStockCount) + ' low · ' + esc(watchStockCount) + ' watch</strong><small>' +
+            esc(stockPlan.committedUnits.toLocaleString()) + ' / ' + esc(stockPlan.capacity.toLocaleString()) + ' capacity committed</small></button>';
 
         html += '<button data-tabgo="recruiting" class="' + (state.applications.length ? 'info' : 'ok') + '"><span>RECRUITING</span><strong>' +
             esc(state.applications.length) + ' application' + (state.applications.length === 1 ? '' : 's') + '</strong><small>' +
@@ -2821,21 +2948,14 @@
     function stockHtml() {
         if (!state.profile) return emptyConnectHtml();
 
-        const forecasts = state.stock.map(function (item) {
-            return { item: item, forecast: stockForecast(item) };
-        });
+        const plan = stockCapacityPlan();
+        const forecasts = plan.rows.slice();
 
-        const lowCount = forecasts.filter(function (row) { return row.forecast.status === 'low'; }).length;
-        const watchCount = forecasts.filter(function (row) { return row.forecast.status === 'watch'; }).length;
-        const suggestedUnits = forecasts.reduce(function (total, row) {
-            return total + row.forecast.suggested;
-        }, 0);
+        const lowCount = forecasts.filter(function (row) { return row.status === 'low'; }).length;
+        const watchCount = forecasts.filter(function (row) { return row.status === 'watch'; }).length;
         const historyDays = Object.keys(state.stockHistory).length;
-        const finiteCover = forecasts.filter(function (row) {
-            return Number.isFinite(row.forecast.totalDays);
-        });
-        const avgCover = finiteCover.length ?
-            finiteCover.reduce(function (total, row) { return total + row.forecast.totalDays; }, 0) / finiteCover.length : 0;
+        const capacityPct = plan.capacity > 0 ? (plan.committedUnits / plan.capacity) * 100 : 0;
+        const constrained = plan.effectiveTargetDays + 0.01 < plan.targetDays;
 
         forecasts.sort(function (a, b) {
             const aDays = Number.isFinite(a.forecast.totalDays) ? a.forecast.totalDays : 999999;
@@ -2853,17 +2973,29 @@
             {
                 label: 'Watch List',
                 value: watchCount,
-                sub: 'Below ' + state.settings.stockTargetDays + '-day target'
+                sub: constrained ? 'Below capacity-adjusted plan target' : 'Below ' + state.settings.stockTargetDays + '-day target'
             },
             {
-                label: 'Avg. Projected Cover',
-                value: avgCover ? avgCover.toFixed(1) + ' days' : '—',
-                sub: 'Including stock currently on order'
+                label: 'Storage Committed',
+                value: plan.committedUnits.toLocaleString() + ' / ' + plan.capacity.toLocaleString(),
+                sub: capacityPct.toFixed(1) + '% · current stock + existing orders',
+                className: plan.overCapacity > 0 ? 'bad' : ''
             },
             {
-                label: 'Suggested Reorder',
-                value: suggestedUnits.toLocaleString() + ' units',
-                sub: 'To reach ' + state.settings.stockTargetDays + ' days of cover'
+                label: 'Free Capacity',
+                value: plan.freeCapacity.toLocaleString() + ' units',
+                sub: plan.overCapacity > 0 ? plan.overCapacity.toLocaleString() + ' units already over capacity' : 'Remaining room after existing orders',
+                className: plan.overCapacity > 0 ? 'bad' : ''
+            },
+            {
+                label: 'Capacity-Safe Reorder',
+                value: plan.suggestedTotal.toLocaleString() + ' units',
+                sub: 'Combined recommendations stay within storage limit'
+            },
+            {
+                label: 'Balanced Plan Cover',
+                value: plan.effectiveTargetDays.toFixed(1) + ' days',
+                sub: constrained ? plan.targetDays + '-day ideal cannot fit in current capacity' : 'Full configured target is achievable'
             },
             {
                 label: 'History',
@@ -2872,18 +3004,29 @@
             }
         ]);
 
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Stock forecast</h3><span>Sorted by lowest projected coverage first</span></div></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Item</th><th>Status</th><th>In Stock</th><th>On Order</th><th>Today Sold</th><th>Avg / Day</th><th>On-Hand Cover</th><th>Total Cover</th><th>Projected Runout</th><th>Suggested Reorder</th></tr></thead><tbody>';
+        if (constrained) {
+            html += '<div class="tccc-dues-status locked"><strong>Warehouse capacity is the limiting factor.</strong><span>Your configured ' +
+                esc(plan.targetDays) + '-day ideal would require approximately ' + esc(plan.idealNeeded.toLocaleString()) +
+                ' additional units, but only ' + esc(plan.freeCapacity.toLocaleString()) +
+                ' units of capacity remain after current stock and existing orders. The reorder plan below therefore balances available space across the products with active sales instead of pretending every item can reach ' +
+                esc(plan.targetDays) + ' days.</span></div>';
+        } else if (plan.overCapacity > 0) {
+            html += '<div class="tccc-dues-status locked"><strong>Committed stock is already above the configured capacity.</strong><span>Current stock plus existing orders exceeds the warehouse limit by ' +
+                esc(plan.overCapacity.toLocaleString()) + ' units, so the script will not suggest additional purchases until capacity opens up.</span></div>';
+        }
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Capacity-aware stock plan</h3><span>Sorted by lowest projected coverage first · combined reorder ≤ available warehouse space</span></div></div>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Item</th><th>Status</th><th>In Stock</th><th>On Order</th><th>Today Sold</th><th>Avg / Day</th><th>On-Hand Cover</th><th>Total Cover</th><th>After Plan</th><th>Projected Runout</th><th>Suggested Reorder</th></tr></thead><tbody>';
 
         forecasts.forEach(function (row) {
             const item = row.item;
             const forecast = row.forecast;
-            const statusLabel = forecast.status === 'low' ? 'LOW' :
-                forecast.status === 'watch' ? 'WATCH' :
-                forecast.status === 'no-sales' ? 'NO SALES' : 'HEALTHY';
-            const statusClass = forecast.status === 'low' ? 'bad' :
-                forecast.status === 'watch' ? 'watch' :
-                forecast.status === 'healthy' ? 'good' : 'neutral';
+            const statusLabel = row.status === 'low' ? 'LOW' :
+                row.status === 'watch' ? 'WATCH' :
+                row.status === 'no-sales' ? 'NO SALES' : 'HEALTHY';
+            const statusClass = row.status === 'low' ? 'bad' :
+                row.status === 'watch' ? 'watch' :
+                row.status === 'healthy' ? 'good' : 'neutral';
 
             html += '<tr><td><strong>' + esc(item.name) + '</strong></td>' +
                 '<td><span class="tccc-stock-status ' + statusClass + '">' + esc(statusLabel) + '</span></td>' +
@@ -2893,17 +3036,20 @@
                 '<td>' + esc(forecast.avgDaily.toFixed(1)) + '<small class="tccc-stock-sample"> (' + esc(forecast.samples) + 'd)</small></td>' +
                 '<td class="' + (Number.isFinite(forecast.onHandDays) && forecast.onHandDays < forecast.warningDays ? 'tccc-negative' : '') + '">' +
                 (Number.isFinite(forecast.onHandDays) ? esc(forecast.onHandDays.toFixed(1) + ' days') : '—') + '</td>' +
-                '<td class="' + (forecast.status === 'low' ? 'tccc-negative' : '') + '">' +
+                '<td class="' + (row.status === 'low' ? 'tccc-negative' : '') + '">' +
                 (Number.isFinite(forecast.totalDays) ? esc(forecast.totalDays.toFixed(1) + ' days') : '—') + '</td>' +
+                '<td class="' + (row.suggested > 0 ? 'tccc-positive' : '') + '">' +
+                (Number.isFinite(row.afterPlanDays) ? esc(row.afterPlanDays.toFixed(1) + ' days') : '—') + '</td>' +
                 '<td>' + esc(formatForecastDate(forecast.runoutAt)) + '</td>' +
-                '<td class="' + (forecast.suggested > 0 ? 'tccc-warning' : '') + '">' +
-                (forecast.suggested > 0 ? esc(forecast.suggested.toLocaleString()) : '—') + '</td></tr>';
+                '<td class="' + (row.suggested > 0 ? 'tccc-warning' : '') + '">' +
+                (row.suggested > 0 ? esc(row.suggested.toLocaleString()) : '—') + '</td></tr>';
         });
 
         html += '</tbody></table></div></section>';
 
-        html += '<div class="tccc-note"><strong>Forecast method:</strong> once at least one completed TCT day exists, average daily sales use up to the most recent 7 completed daily snapshots. Until then, the script uses today\'s current sold amount as the temporary pace. Total cover includes stock already on order. Suggested reorder is the extra quantity needed to reach your configured ' +
-            esc(state.settings.stockTargetDays) + '-day target after counting current stock and existing orders. These are planning estimates, not automatic purchase instructions.</div>';
+        html += '<div class="tccc-note"><strong>Capacity-aware forecast:</strong> the configured ' +
+            esc(plan.targetDays) + '-day value is now an ideal, not a promise. The planner first reserves space for everything currently in stock and already on order, then distributes only the remaining warehouse capacity across actively selling products. When the full target cannot fit, it calculates the highest balanced coverage achievable within your ' +
+            esc(plan.capacity.toLocaleString()) + '-unit limit. Suggested reorders across the entire table are therefore designed to total no more than the remaining capacity. These remain planning estimates, not automatic purchase instructions.</div>';
         return html;
     }
 
@@ -2918,6 +3064,7 @@
             '<label>Other daily company cost <input id="tccc-extra-cost" type="number" min="0" step="1000" value="' + esc(state.settings.extraDailyCost) + '"></label>' +
             '<label>Stock target days <input id="tccc-stock-target-days" type="number" min="1" max="60" step="1" value="' + esc(state.settings.stockTargetDays) + '"></label>' +
             '<label>Low-stock warning days <input id="tccc-stock-warning-days" type="number" min="0" max="60" step="1" value="' + esc(state.settings.stockWarningDays) + '"></label>' +
+            '<label>Maximum stock capacity <input id="tccc-stock-capacity" type="number" min="1" step="1000" value="' + esc(state.settings.stockCapacity) + '"></label>' +
             '<label class="tccc-check"><input id="tccc-exclude-director" type="checkbox" ' + (state.settings.excludeDirector ? 'checked' : '') + '> Exclude director from monthly eDVD dues</label>' +
             '</div>' +
             '<div class="tccc-settings-divider"></div>' +
@@ -3092,6 +3239,7 @@
             state.settings.extraDailyCost = Math.max(0, num(document.getElementById('tccc-extra-cost').value));
             state.settings.stockTargetDays = Math.max(1, num(document.getElementById('tccc-stock-target-days').value) || 7);
             state.settings.stockWarningDays = Math.max(0, num(document.getElementById('tccc-stock-warning-days').value));
+            state.settings.stockCapacity = Math.max(1, Math.floor(num(document.getElementById('tccc-stock-capacity').value) || 500000));
             state.settings.launcherCompanyOnly = !!document.getElementById('tccc-launch-company-only').checked;
             state.settings.alertsEnabled = !!document.getElementById('tccc-alerts-enabled').checked;
             state.settings.alertTraining = !!document.getElementById('tccc-alert-training').checked;
