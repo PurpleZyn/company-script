@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.1 - 2026-09-25
+
+Capacity-aware stock forecasting.
+
+### Fixed
+- Suggested reorders no longer assume every product can independently reach the full target-days setting.
+- The planner now respects a shared warehouse capacity (500,000 units by default).
+- Current stock and stock already on order both count against available capacity.
+- Combined suggested reorders are capped to the remaining warehouse space.
+
+### Added
+- Configurable **Maximum stock capacity** setting.
+- Capacity summary showing committed stock, free capacity, and warehouse utilization.
+- Capacity-safe reorder total.
+- Balanced plan coverage showing the highest realistic shared days-of-cover target when the ideal target cannot fit.
+- Per-item **After Plan** coverage column.
+- Stock warnings and Overview stock attention now use the capacity-aware plan.
+
+### Planning method
+When the configured target (for example 7 days) cannot fit inside the warehouse, the planner distributes the available space toward the lowest-covered actively selling products so coverage is balanced as much as possible instead of recommending an impossible total order.
+
 ## 1.0.0 - 2026-09-23
 
 First complete local-first release.
