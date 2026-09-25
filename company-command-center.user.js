@@ -3004,15 +3004,15 @@
             }
         ]);
 
-        if (constrained) {
+        if (plan.overCapacity > 0) {
+            html += '<div class="tccc-dues-status locked"><strong>Committed stock is already above the configured capacity.</strong><span>Current stock plus existing orders exceeds the warehouse limit by ' +
+                esc(plan.overCapacity.toLocaleString()) + ' units, so the script will not suggest additional purchases until capacity opens up.</span></div>';
+        } else if (constrained) {
             html += '<div class="tccc-dues-status locked"><strong>Warehouse capacity is the limiting factor.</strong><span>Your configured ' +
                 esc(plan.targetDays) + '-day ideal would require approximately ' + esc(plan.idealNeeded.toLocaleString()) +
                 ' additional units, but only ' + esc(plan.freeCapacity.toLocaleString()) +
                 ' units of capacity remain after current stock and existing orders. The reorder plan below therefore balances available space across the products with active sales instead of pretending every item can reach ' +
                 esc(plan.targetDays) + ' days.</span></div>';
-        } else if (plan.overCapacity > 0) {
-            html += '<div class="tccc-dues-status locked"><strong>Committed stock is already above the configured capacity.</strong><span>Current stock plus existing orders exceeds the warehouse limit by ' +
-                esc(plan.overCapacity.toLocaleString()) + ' units, so the script will not suggest additional purchases until capacity opens up.</span></div>';
         }
 
         html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Capacity-aware stock plan</h3><span>Sorted by lowest projected coverage first · combined reorder ≤ available warehouse space</span></div></div>';
