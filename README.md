@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 1.0.0
+**Current version:** 1.0.1
 
 ## Install
 
@@ -133,7 +133,11 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Projected run-out date
 - LOW / WATCH / HEALTHY / NO SALES status
 - Configurable stock target and warning thresholds
-- Suggested reorder quantity to reach the target coverage
+- Configurable maximum warehouse capacity (500,000 by default)
+- Capacity-aware reorder planning across the full catalog
+- Current stock + existing orders reserve warehouse space before new recommendations
+- Balanced achievable coverage when the ideal target cannot fit
+- Combined suggested reorders stay within remaining capacity
 
 ### Local backup
 Settings (excluding the API key), financial snapshots, and eDVD records can be exported to JSON and imported later.
