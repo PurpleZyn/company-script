@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.0 - 2026-11-02
+
+Multi-month dues prepayment tracking.
+
+### Added
+- Future-month dues ledger built directly into the existing eDVD dues system.
+- +1 month, +3 months, and custom future-prepay controls for each employee.
+- Manual prepaid months are assigned to specific future TCT months and persist locally.
+- UNDO removes the most recent manual future prepayment.
+- Per-employee "Future Coverage" showing how many consecutive months are prepaid and the paid-through month.
+- Upcoming prepaid-month cards showing exactly which future months are already covered.
+- Summary cards for total future prepaid months and employees covered ahead.
+
+### Automatic prepay allocation
+- Extra qualifying eDVD quantities can now automatically roll into future months.
+- Example: with a 1-eDVD monthly requirement, a qualifying 3-eDVD send can cover the current unpaid month plus two future unpaid months.
+- If the current month is already covered by an earlier prepayment or manual payment, newly detected full-month quantities are pushed forward instead of being wasted.
+- Existing paid future months are skipped rather than overwritten.
+- Rescanning the same logs is idempotent: the script rebuilds that month's automatic allocations instead of duplicating credits.
+
+### Notes
+- Manual +1/+3/CUSTOM buttons cover future months only and do not change the current-month status.
+- Manual future prepayments remain separate from automatic scanner allocations.
+- Export/import already carries these future records because they are stored inside the normal dues ledger.
+
 ## 1.0.1 - 2026-09-25
 
 Capacity-aware stock forecasting.
