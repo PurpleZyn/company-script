@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.1 - 2026-11-02
+
+Dues prepayment migration fix.
+
+### Fixed
+- Corrected an off-by-one issue when upgrading existing automatic dues records from pre-v1.1 builds.
+- Legacy current-month AUTO payments are now recognized as the current month portion of the same detected eDVD payment instead of being treated as a separate extra payment.
+- Example: 4 qualifying eDVDs received in November now correctly cover November, December, January, and February — showing **3 future months · through Feb 2027**.
+- A single qualifying November eDVD now covers November only and no longer incorrectly creates a December prepayment.
+- Existing manual payments/prepayments remain untouched.
+
+### Migration behavior
+After installing v1.1.1, the next dues scan rebuilds scanner-owned allocations from the Torn logs and removes the extra future month created by the v1.1.0 migration bug.
+
 ## 1.1.0 - 2026-11-02
 
 Multi-month dues prepayment tracking.
