@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 1.1.0
+**Current version:** 1.1.1
 
 ## Install
 
