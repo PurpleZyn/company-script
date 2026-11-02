@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      1.0.1
+// @version      1.1.0
 // @description  Complete local-first director dashboard for Torn companies: finances, staff, training, dues, stock, recruiting, optimization, alerts, and analytics.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '1.0.1',
+        version: '1.1.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -138,6 +138,26 @@
 
     function currentMonth() {
         return new Date().toISOString().slice(0, 7);
+    }
+
+    function addMonthKey(month, offset) {
+        const parts = String(month || currentMonth()).split('-');
+        const year = num(parts[0]);
+        const monthIndex = Math.max(0, num(parts[1]) - 1);
+        const date = new Date(Date.UTC(year, monthIndex + num(offset), 1));
+        return date.toISOString().slice(0, 7);
+    }
+
+    function formatMonthKey(month) {
+        const parts = String(month || '').split('-');
+        const year = num(parts[0]);
+        const monthIndex = Math.max(0, num(parts[1]) - 1);
+        if (!year || !parts[1]) return String(month || '');
+        return new Date(Date.UTC(year, monthIndex, 1)).toLocaleDateString(undefined, {
+            month: 'short',
+            year: 'numeric',
+            timeZone: 'UTC'
+        });
     }
 
     function monthStartTimestamp(month) {
@@ -1472,6 +1492,77 @@
         render();
     }
 
+    function removeAutoPrepaySource(sourceKey) {
+        Object.keys(state.dues).forEach(function (month) {
+            const ledger = state.dues[month];
+            if (!ledger || typeof ledger !== 'object') return;
+
+            Object.keys(ledger).forEach(function (employeeId) {
+                const record = ledger[employeeId];
+                if (!record || record.prepaySourceKey !== sourceKey || !record.autoPrepay) return;
+
+                if (record.manualOverride || record.prepaidManual) {
+                    delete record.prepaySourceKey;
+                    delete record.autoPrepay;
+                    return;
+                }
+
+                delete ledger[employeeId];
+            });
+        });
+    }
+
+    function recordCovered(record) {
+        return !!(record && record.paid);
+    }
+
+    function allocateAutoDuesMonths(employee, fullMonths, aggregate, required) {
+        if (!employee || fullMonths <= 0) return [];
+
+        const employeeId = String(employee.id);
+        const month = currentMonth();
+        const sourceKey = 'auto-edvd:' + month + ':' + employeeId;
+        removeAutoPrepaySource(sourceKey);
+
+        const currentLedger = monthLedger(month);
+        const currentRecord = currentLedger[employeeId] || {};
+        const currentBlocked = currentRecord.manualOverride === 'unpaid';
+        const currentCovered = recordCovered(currentRecord);
+        const allocated = [];
+        let cursor = (currentCovered || currentBlocked) ? 1 : 0;
+        let remaining = fullMonths;
+        let safety = 0;
+
+        while (remaining > 0 && safety < 120) {
+            const targetMonth = addMonthKey(month, cursor);
+            const ledger = monthLedger(targetMonth);
+            const existing = ledger[employeeId] || {};
+
+            if (!recordCovered(existing) && existing.manualOverride !== 'unpaid') {
+                ledger[employeeId] = Object.assign({}, existing, {
+                    paid: true,
+                    paidAt: aggregate.latest || Math.floor(Date.now() / 1000),
+                    method: targetMonth === month ?
+                        'AUTO · ' + aggregate.quantity + ' eDVD · ' + duesKeywords().join('/') :
+                        'AUTO PREPAY · ' + required + ' eDVD allocated from ' + formatMonthKey(month),
+                    auto: true,
+                    prepaid: targetMonth !== month,
+                    autoPrepay: true,
+                    prepaidManual: false,
+                    prepaySourceKey: sourceKey,
+                    prepayOriginMonth: month
+                });
+                allocated.push(targetMonth);
+                remaining -= 1;
+            }
+
+            cursor += 1;
+            safety += 1;
+        }
+
+        return allocated;
+    }
+
     function applyAutomaticDuesMatches(logs) {
         const month = currentMonth();
         const ledger = monthLedger(month);
@@ -1518,38 +1609,50 @@
         duesEmployees().forEach(function (employee) {
             const key = String(employee.id);
             const aggregate = aggregates[key] || { quantity: 0, latest: 0, messages: [], logIds: [] };
+            const sourceKey = 'auto-edvd:' + month + ':' + key;
+
+            // Rebuild only this month's automatic allocation source so rescans are idempotent.
+            removeAutoPrepaySource(sourceKey);
+
             const existing = ledger[key] || {};
             existing.receivedQty = aggregate.quantity;
             existing.detectedLogs = aggregate.logIds;
             existing.detectedMessages = aggregate.messages;
+            ledger[key] = existing;
 
-            if (existing.manualOverride === 'paid') {
-                existing.paid = true;
-            } else if (existing.manualOverride === 'unpaid') {
-                existing.paid = false;
-            } else if (aggregate.quantity >= required) {
-                existing.paid = true;
-                existing.paidAt = aggregate.latest || existing.paidAt || Math.floor(Date.now() / 1000);
-                existing.method = 'AUTO · ' + aggregate.quantity + ' eDVD · ' + duesKeywords().join('/');
-                existing.auto = true;
-            } else if (existing.auto) {
-                existing.paid = false;
-                existing.paidAt = null;
-                existing.method = '';
-                existing.auto = false;
+            const fullMonths = Math.floor(aggregate.quantity / required);
+            const allocations = fullMonths > 0 ?
+                allocateAutoDuesMonths(employee, fullMonths, aggregate, required) : [];
+
+            const currentAfterAllocation = monthLedger(month)[key] || existing;
+
+            if (currentAfterAllocation.manualOverride === 'paid') {
+                currentAfterAllocation.paid = true;
+            } else if (currentAfterAllocation.manualOverride === 'unpaid') {
+                currentAfterAllocation.paid = false;
+            } else if (!currentAfterAllocation.prepaid && !currentAfterAllocation.prepaidManual &&
+                fullMonths <= 0 && currentAfterAllocation.auto) {
+                currentAfterAllocation.paid = false;
+                currentAfterAllocation.paidAt = null;
+                currentAfterAllocation.method = '';
+                currentAfterAllocation.auto = false;
             }
+
+            currentAfterAllocation.receivedQty = aggregate.quantity;
+            currentAfterAllocation.detectedLogs = aggregate.logIds;
+            currentAfterAllocation.detectedMessages = aggregate.messages;
+            ledger[key] = currentAfterAllocation;
 
             if (aggregate.quantity > 0) {
                 state.duesScan.matches.push({
                     employeeId: key,
                     employeeName: employee.name,
                     quantity: aggregate.quantity,
-                    paid: aggregate.quantity >= required,
+                    paid: !!currentAfterAllocation.paid,
+                    allocatedMonths: allocations,
                     timestamp: aggregate.latest
                 });
             }
-
-            ledger[key] = existing;
         });
 
         saveDues();
@@ -1601,6 +1704,108 @@
         return state.employees.filter(function (employee) {
             return !(state.settings.excludeDirector && isDirector(employee));
         });
+    }
+
+    function futurePrepayMonths(employeeId, limit) {
+        const key = String(employeeId);
+        const start = currentMonth();
+        const results = [];
+        const max = Math.max(1, num(limit) || 36);
+
+        for (let offset = 1; offset <= max; offset += 1) {
+            const month = addMonthKey(start, offset);
+            const record = state.dues[month] && state.dues[month][key];
+            if (record && record.paid) {
+                results.push({
+                    month: month,
+                    record: record
+                });
+            }
+        }
+        return results;
+    }
+
+    function consecutivePrepaySummary(employeeId) {
+        const key = String(employeeId);
+        const start = currentMonth();
+        let count = 0;
+        let through = '';
+        let offset = 1;
+
+        while (offset <= 60) {
+            const month = addMonthKey(start, offset);
+            const record = state.dues[month] && state.dues[month][key];
+            if (!record || !record.paid) break;
+            count += 1;
+            through = month;
+            offset += 1;
+        }
+
+        return { count: count, through: through };
+    }
+
+    function addManualPrepaidMonths(employeeId, count) {
+        const key = String(employeeId);
+        let remaining = Math.max(1, Math.floor(num(count) || 1));
+        let offset = 1;
+        let safety = 0;
+        const now = Math.floor(Date.now() / 1000);
+        const origin = currentMonth();
+
+        while (remaining > 0 && safety < 120) {
+            const month = addMonthKey(origin, offset);
+            const ledger = monthLedger(month);
+            const existing = ledger[key] || {};
+
+            if (!recordCovered(existing)) {
+                ledger[key] = Object.assign({}, existing, {
+                    paid: true,
+                    paidAt: now,
+                    method: 'MANUAL PREPAY · added ' + formatMonthKey(origin),
+                    auto: false,
+                    prepaid: true,
+                    prepaidManual: true,
+                    autoPrepay: false,
+                    prepayOriginMonth: origin
+                });
+                remaining -= 1;
+            }
+
+            offset += 1;
+            safety += 1;
+        }
+
+        saveDues();
+        render();
+    }
+
+    function addCustomPrepaidMonths(employeeId) {
+        const raw = window.prompt('How many FUTURE months should be marked prepaid for this employee?', '1');
+        if (raw === null) return;
+        const count = Math.floor(num(raw));
+        if (count <= 0 || count > 60) {
+            window.alert('Enter a number from 1 to 60.');
+            return;
+        }
+        addManualPrepaidMonths(employeeId, count);
+    }
+
+    function removeLastManualPrepay(employeeId) {
+        const key = String(employeeId);
+        const future = futurePrepayMonths(key, 60)
+            .filter(function (entry) { return !!entry.record.prepaidManual; })
+            .sort(function (a, b) { return b.month.localeCompare(a.month); });
+
+        if (!future.length) return;
+
+        const target = future[0];
+        const confirmed = window.confirm('Remove the manual prepayment for ' + formatMonthKey(target.month) + '?');
+        if (!confirmed) return;
+
+        delete state.dues[target.month][key];
+        if (!Object.keys(state.dues[target.month]).length) delete state.dues[target.month];
+        saveDues();
+        render();
     }
 
     function toggleDue(employeeId) {
@@ -2371,6 +2576,12 @@
         const autoMatched = employees.filter(function (e) {
             return num(ledger[String(e.id)] && ledger[String(e.id)].receivedQty) > 0;
         }).length;
+        const prepaidEmployees = employees.filter(function (e) {
+            return consecutivePrepaySummary(e.id).count > 0;
+        }).length;
+        const futureMonthsCovered = employees.reduce(function (total, e) {
+            return total + consecutivePrepaySummary(e.id).count;
+        }, 0);
 
         let scanLabel = 'Checking…';
         let scanClass = '';
@@ -2387,13 +2598,14 @@
         let html = cards([
             { label: 'Month', value: month },
             { label: 'Paid', value: paidCount + ' / ' + employees.length, className: paidCount === employees.length ? 'good' : '' },
+            { label: 'Future Prepaids', value: futureMonthsCovered + ' month' + (futureMonthsCovered === 1 ? '' : 's'), sub: prepaidEmployees + ' employee' + (prepaidEmployees === 1 ? '' : 's') + ' covered ahead' },
             { label: 'Monthly Requirement', value: state.settings.edvdQty + ' eDVD' },
             { label: 'Auto Scanner', value: scanLabel, sub: autoMatched + ' employee payment' + (autoMatched === 1 ? '' : 's') + ' detected', className: scanClass }
         ]);
 
         if (state.duesScan.status === 'ready') {
             html += '<div class="tccc-dues-status ready"><strong>Automatic dues scanning is active.</strong><span>Direct Item Receive logs for Erotic DVD #366 are counted only when the sender is a current employee and the message contains one of these keywords: <b>' +
-                esc(duesKeywords().join(', ')) + '</b>.</span></div>';
+                esc(duesKeywords().join(', ')) + '</b>. Full extra monthly quantities are now carried forward into future prepaid months automatically.</span></div>';
         } else if (state.duesScan.status === 'locked') {
             html += '<div class="tccc-dues-status locked"><strong>Automatic scanning needs additional API permission.</strong><span>Your normal company dashboard can keep using its current key. For dues, add an optional Custom API key in Settings with access to <b>User → Log</b>, restricted to the <b>Item receive (4103)</b> log type. Current scanner response: ' +
                 esc(state.duesScan.error || 'log access unavailable') + '</span></div>';
@@ -2401,26 +2613,57 @@
 
         const resetAt = num(state.duesResetAt[month]);
 
-        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>eDVD dues</h3><span>Automatic matches + manual overrides' +
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>eDVD dues & prepayments</h3><span>Current month + future coverage' +
             (resetAt ? ' · reset baseline ' + esc(formatDate(resetAt)) : '') +
             '</span></div><div class="tccc-dues-actions"><button id="tccc-scan-dues" class="tccc-small-action">Scan now</button><button id="tccc-reset-dues" class="tccc-small-action danger">Reset month</button></div></div>';
-        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Employee</th><th>Status</th><th>Detected</th><th>Paid at</th><th>Method</th><th>Control</th></tr></thead><tbody>';
+        html += '<div class="tccc-tablewrap"><table><thead><tr><th>Employee</th><th>Current Status</th><th>Detected</th><th>Future Coverage</th><th>Method</th><th>Current Control</th><th>Prepay</th></tr></thead><tbody>';
 
         employees.forEach(function (e) {
             const record = ledger[String(e.id)] || {};
             const detected = num(record.receivedQty);
             const hasOverride = !!record.manualOverride;
+            const prepay = consecutivePrepaySummary(e.id);
+            const futureLabel = prepay.count ?
+                prepay.count + ' mo · through ' + formatMonthKey(prepay.through) : '—';
+            const manualFuture = futurePrepayMonths(e.id, 60).some(function (entry) {
+                return !!entry.record.prepaidManual;
+            });
+
             html += '<tr><td><strong>' + esc(e.name) + '</strong></td><td><button class="tccc-duebtn ' + (record.paid ? 'paid' : 'unpaid') +
                 '" data-due="' + esc(e.id) + '">' + (record.paid ? 'PAID' : 'UNPAID') + '</button></td><td class="' +
                 (detected >= num(state.settings.edvdQty) && detected > 0 ? 'tccc-positive' : '') + '">' +
-                esc(detected + ' / ' + state.settings.edvdQty + ' eDVD') + '</td><td>' +
-                esc(record.paidAt ? formatDate(record.paidAt) : '—') + '</td><td>' + esc(record.method || '—') + '</td><td>' +
-                (hasOverride ? '<button class="tccc-auto-reset" data-due-auto="' + esc(e.id) + '">RETURN TO AUTO</button>' : '<span class="tccc-auto-label">' + (record.auto ? 'AUTO' : '—') + '</span>') +
-                '</td></tr>';
+                esc(detected + ' eDVD') + '</td><td class="' + (prepay.count ? 'tccc-positive' : '') + '">' + esc(futureLabel) + '</td><td>' +
+                esc(record.method || '—') + '</td><td>' +
+                (hasOverride ? '<button class="tccc-auto-reset" data-due-auto="' + esc(e.id) + '">RETURN TO AUTO</button>' : '<span class="tccc-auto-label">' + (record.auto ? 'AUTO' : (record.prepaid ? 'PREPAID' : '—')) + '</span>') +
+                '</td><td><div class="tccc-prepay-actions">' +
+                '<button data-prepay-add="' + esc(e.id) + '" data-prepay-months="1">+1</button>' +
+                '<button data-prepay-add="' + esc(e.id) + '" data-prepay-months="3">+3</button>' +
+                '<button data-prepay-custom="' + esc(e.id) + '">CUSTOM</button>' +
+                (manualFuture ? '<button class="remove" data-prepay-remove="' + esc(e.id) + '">UNDO</button>' : '') +
+                '</div></td></tr>';
         });
 
         html += '</tbody></table></div></section>';
-        html += '<div class="tccc-note"><strong>Payment rule:</strong> The scanner currently watches direct item sends received during the current TCT month. A payment only counts if it came from a current employee, contains Erotic DVD #366, and its send-message contains one of your configured dues keywords. Multiple qualifying sends from the same employee are added together. Clicking PAID/UNPAID creates a manual override; “Return to auto” hands that employee back to the scanner. <strong>Reset month</strong> clears this month\'s ledger and establishes a new cutoff, so qualifying sends received before the reset will not repopulate the chart.</div>';
+
+        html += '<section class="tccc-panel"><div class="tccc-panel-head"><div><h3>Upcoming prepaid months</h3><span>Consecutive future coverage from next month forward</span></div></div>';
+        html += '<div class="tccc-prepay-grid">';
+        const withPrepay = employees.filter(function (e) { return consecutivePrepaySummary(e.id).count > 0; });
+        if (!withPrepay.length) {
+            html += '<div class="tccc-training-log-empty">No future dues are currently prepaid.</div>';
+        } else {
+            withPrepay.forEach(function (e) {
+                const summary = consecutivePrepaySummary(e.id);
+                const months = futurePrepayMonths(e.id, 60).filter(function (entry) {
+                    return entry.month <= summary.through;
+                });
+                html += '<div class="tccc-prepay-card"><strong>' + esc(e.name) + '</strong><span>' +
+                    esc(summary.count + ' month' + (summary.count === 1 ? '' : 's') + ' prepaid') +
+                    '</span><small>' + months.map(function (entry) { return formatMonthKey(entry.month); }).join(' · ') + '</small></div>';
+            });
+        }
+        html += '</div></section>';
+
+        html += '<div class="tccc-note"><strong>How prepayments work:</strong> +1, +3, and CUSTOM mark future unpaid months as prepaid without changing the current-month status. If the automatic scanner detects more full monthly eDVD quantities than are needed for the first uncovered month, the extra full months are carried forward automatically. Example: with a 1-eDVD monthly requirement, a qualifying 3-eDVD send can cover the current unpaid month plus the next two unpaid months. Manual prepaid months can be removed one at a time with UNDO. Existing future payments are skipped rather than overwritten.</div>';
         return html;
     }
 
@@ -3058,7 +3301,7 @@
             '<h3>Connection & company rules</h3>' +
             '<label>Primary Torn API key <input id="tccc-api-key" type="password" value="' + esc(state.settings.apiKey) + '" placeholder="Limited or suitably scoped Custom key"></label>' +
             '<div class="tccc-settings-grid">' +
-            '<label>eDVDs per employee / month <input id="tccc-edvd-qty" type="number" min="0" step="1" value="' + esc(state.settings.edvdQty) + '"></label>' +
+            '<label>eDVDs per employee / month (also sets prepay conversion) <input id="tccc-edvd-qty" type="number" min="0" step="1" value="' + esc(state.settings.edvdQty) + '"></label>' +
             '<label>Monthly due day <input id="tccc-due-day" type="number" min="1" max="28" step="1" value="' + esc(state.settings.dueDay) + '"></label>' +
             '<label>Dues message keywords <input id="tccc-dues-keywords" type="text" value="' + esc(state.settings.duesKeywords) + '" placeholder="CHAP,DUES"></label>' +
             '<label>Other daily company cost <input id="tccc-extra-cost" type="number" min="0" step="1000" value="' + esc(state.settings.extraDailyCost) + '"></label>' +
@@ -3183,6 +3426,27 @@
         document.querySelectorAll('[data-due-auto]').forEach(function (button) {
             button.addEventListener('click', function () {
                 clearDueOverride(button.getAttribute('data-due-auto'));
+            });
+        });
+
+        document.querySelectorAll('[data-prepay-add]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                addManualPrepaidMonths(
+                    button.getAttribute('data-prepay-add'),
+                    button.getAttribute('data-prepay-months')
+                );
+            });
+        });
+
+        document.querySelectorAll('[data-prepay-custom]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                addCustomPrepaidMonths(button.getAttribute('data-prepay-custom'));
+            });
+        });
+
+        document.querySelectorAll('[data-prepay-remove]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                removeLastManualPrepay(button.getAttribute('data-prepay-remove'));
             });
         });
 
@@ -3371,11 +3635,11 @@
             '.tccc-position-mix{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-position-mix>div,.tccc-recruit-status>div{display:flex;justify-content:space-between;align-items:center;background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px 11px}.tccc-position-mix span,.tccc-recruit-status span{color:#aaa2b3!important;font-size:10px;font-weight:700}.tccc-position-plan{position:relative;padding-right:72px!important}.tccc-position-plan small{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:8px!important;font-weight:900!important;text-transform:uppercase}.tccc-position-plan.target small{color:#8ee3ae!important}.tccc-position-plan.short small{color:#ff98a4!important}.tccc-position-plan.over small{color:#f5c781!important}.tccc-staffing-editor{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.tccc-staffing-editor label{display:flex;flex-direction:column;gap:6px;background:#19151e;border:1px solid #3e3447;border-radius:9px;padding:10px}.tccc-staffing-editor label span{color:#b7aec0!important;font-size:10px;font-weight:800}.tccc-staffing-editor input{background:#121016!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:7px;padding:8px 9px;font-size:13px!important}.tccc-staffing-plan-summary{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;color:#aaa2b2!important;font-size:10px;font-weight:800}.tccc-optimizer-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0 0 13px}.tccc-optimizer-summary>div{background:#19151e;border:1px solid #3e3447;border-radius:8px;padding:10px}.tccc-optimizer-summary span{display:block;color:#aaa2b3!important;font-size:9px;text-transform:uppercase;letter-spacing:.45px;font-weight:800}.tccc-optimizer-summary strong{display:block;color:#f2edf6!important;font-size:15px;margin-top:4px}.tccc-optimizer-change-row td{background:rgba(245,199,129,.035)!important}.tccc-role-score{color:#8f8798!important;font-size:9px!important}.tccc-role-fit{color:#c4a4ff!important}.tccc-manager-callout{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:8px;margin:0 0 13px;padding:10px;border:1px solid #6b4f92;background:rgba(118,84,189,.08);border-radius:10px}.tccc-manager-callout>div{background:#19151e;border:1px solid #41364c;border-radius:8px;padding:9px 10px}.tccc-manager-callout span{display:block;color:#aaa2b3!important;font-size:9px;text-transform:uppercase;font-weight:800;letter-spacing:.4px}.tccc-manager-callout strong{display:block;color:#f2edf6!important;font-size:14px;margin-top:4px}.tccc-position-mix strong,.tccc-recruit-status strong{color:#f3edf7!important;font-size:14px}.tccc-recruit-status{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tccc-recruit-empty{display:flex;flex-direction:column;gap:5px;text-align:center;padding:36px 16px;background:#1a161f;border:1px dashed #493d53;border-radius:10px}.tccc-recruit-empty strong{color:#f1ecf5!important;font-size:14px}.tccc-recruit-empty span{color:#aaa1b2!important;font-size:11px}.tccc-application-message{white-space:normal!important;min-width:220px;max-width:420px}',
             '.tccc-stock-status{display:inline-block;border-radius:999px;padding:5px 8px;font-size:9px!important;font-weight:900!important}.tccc-stock-status.good{background:#204b34;color:#8ee3ae!important}.tccc-stock-status.watch{background:#59421f;color:#f5c781!important}.tccc-stock-status.bad{background:#55252e;color:#ff98a4!important}.tccc-stock-status.neutral{background:#3a3341;color:#c4bbc9!important}.tccc-stock-sample{color:#8f8798!important;font-size:9px!important}.tccc-modal .tccc-warning,.tccc-modal td.tccc-warning{color:#f5c781!important;font-weight:800!important}',
             '.tccc-filterbar{display:flex;gap:7px;flex-wrap:wrap;margin:4px 0 12px}.tccc-filterbar button{border:1px solid #4c4056;background:#1c1722;color:#bfb6c7!important;border-radius:999px;padding:7px 10px;font-size:9px!important;font-weight:900!important;cursor:pointer}.tccc-filterbar button.active{background:#7449c8;border-color:#865ee0;color:#fff!important}.tccc-employee-status{display:inline-block;border-radius:999px;padding:5px 8px;font-size:9px!important;font-weight:900!important}.tccc-employee-status.good{background:#204b34;color:#8ee3ae!important}.tccc-employee-status.bad{background:#55252e;color:#ff98a4!important}.tccc-expand-employee{border:1px solid #564568;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 8px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-expand-employee:hover{border-color:#7b5ca5;background:#372a45}.tccc-employee-detail-row td{padding:0!important;background:#19151e!important}.tccc-employee-detail{padding:14px 16px 16px;border-left:3px solid #7654bd}.tccc-employee-detail-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:12px}.tccc-employee-detail-head strong{display:block;color:#f2edf6!important;font-size:14px}.tccc-employee-detail-head span{display:block;color:#a69dad!important;font-size:10px;margin-top:3px}.tccc-trend-note{color:#b4aabd!important;font-size:10px;line-height:1.45;text-align:right}.tccc-effectiveness-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.tccc-effectiveness-grid>div{background:#211b29;border:1px solid #3e3447;border-radius:8px;padding:9px 10px}.tccc-effectiveness-grid span{display:block;color:#a69dad!important;font-size:9px;text-transform:uppercase;letter-spacing:.5px;font-weight:800}.tccc-effectiveness-grid strong{display:block;color:#f1ebf5!important;font-size:14px;margin-top:4px}',
-            '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}.tccc-dues-status{display:flex;gap:8px;flex-direction:column;border:1px solid #44394d;border-radius:10px;padding:12px 14px;margin-bottom:14px}.tccc-dues-status strong{font-size:12px!important}.tccc-dues-status span{font-size:11px!important;line-height:1.5;color:#b9b0c1!important}.tccc-dues-status.ready{background:#17251d;border-color:#315e46}.tccc-dues-status.ready strong{color:#8fe0ae!important}.tccc-dues-status.locked{background:#2a2023;border-color:#70404a}.tccc-dues-status.locked strong{color:#ff9aa7!important}.tccc-auto-reset{border:1px solid #604d70;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 7px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-auto-label{font-size:9px;color:#83d6a5!important;font-weight:900}.tccc-dues-actions{display:flex;gap:7px;align-items:center}.tccc-small-action.danger{border-color:#6f3a46!important;background:#3a2027!important;color:#ff9aa7!important}.tccc-small-action.danger:hover{border-color:#9a4e5e!important;background:#4b252f!important}.tccc-settings-divider{height:1px;background:#44394d;margin:20px 0}',
+            '.tccc-duebtn{border:0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer}.tccc-duebtn.paid{background:#204b34;color:#8ee3ae}.tccc-duebtn.unpaid{background:#55252e;color:#ff98a4}.tccc-dues-status{display:flex;gap:8px;flex-direction:column;border:1px solid #44394d;border-radius:10px;padding:12px 14px;margin-bottom:14px}.tccc-dues-status strong{font-size:12px!important}.tccc-dues-status span{font-size:11px!important;line-height:1.5;color:#b9b0c1!important}.tccc-dues-status.ready{background:#17251d;border-color:#315e46}.tccc-dues-status.ready strong{color:#8fe0ae!important}.tccc-dues-status.locked{background:#2a2023;border-color:#70404a}.tccc-dues-status.locked strong{color:#ff9aa7!important}.tccc-auto-reset{border:1px solid #604d70;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 7px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-auto-label{font-size:9px;color:#83d6a5!important;font-weight:900}.tccc-dues-actions{display:flex;gap:7px;align-items:center}.tccc-small-action.danger{border-color:#6f3a46!important;background:#3a2027!important;color:#ff9aa7!important}.tccc-small-action.danger:hover{border-color:#9a4e5e!important;background:#4b252f!important}.tccc-prepay-actions{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.tccc-prepay-actions button{border:1px solid #5a4a68;background:#2b2334;color:#d9c8ef!important;border-radius:6px;padding:5px 7px;font-size:8px!important;font-weight:900!important;cursor:pointer}.tccc-prepay-actions button:hover{border-color:#8668b2;background:#392c47}.tccc-prepay-actions button.remove{border-color:#70404a;color:#ff9aa7!important;background:#3a2027}.tccc-prepay-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.tccc-prepay-card{display:flex;flex-direction:column;gap:4px;background:#19151e;border:1px solid #413747;border-radius:9px;padding:10px 11px}.tccc-prepay-card strong{color:#f1ecf5!important;font-size:12px}.tccc-prepay-card span{color:#8ee3ae!important;font-size:10px;font-weight:800}.tccc-prepay-card small{color:#aaa2b3!important;font-size:9px;line-height:1.4}.tccc-settings-divider{height:1px;background:#44394d;margin:20px 0}',
             '.tccc-settings label{display:flex;flex-direction:column;gap:7px;color:#c1b8ca!important;font-size:11px;font-weight:700;margin-top:14px}.tccc-settings input[type=password],.tccc-settings input[type=number],.tccc-settings input[type=text]{background:#151219!important;border:1px solid #4a3f53!important;color:#fff!important;border-radius:8px;padding:10px 11px;font-size:13px!important;line-height:1.25!important}.tccc-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.tccc-settings .tccc-check{flex-direction:row;align-items:center;color:#c8c0d0!important}.tccc-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px}.tccc-setting-actions button,.tccc-empty button{border:1px solid #564568;background:#2b2334;color:#e7dfef!important;padding:10px 13px;border-radius:8px;font-size:12px!important;font-weight:800!important;cursor:pointer}.tccc-setting-actions button.primary,.tccc-empty button.primary{background:#7449c8;border-color:#865ee0;color:#fff!important}',
             '.tccc-empty{text-align:center;padding:70px 20px;color:#eee8f4}.tccc-empty p{color:#b3aabb!important;max-width:560px;margin:12px auto 18px;line-height:1.55}',
-            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-effectiveness-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-employee-detail-head{flex-direction:column}.tccc-trend-note{text-align:left}.tccc-position-mix,.tccc-recruit-status{grid-template-columns:1fr}.tccc-staffing-editor{grid-template-columns:1fr}.tccc-optimizer-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-manager-callout{grid-template-columns:1fr}.tccc-brief-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-modal main{padding:10px}}',
-            '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-brief-grid{grid-template-columns:1fr}.tccc-overview-trend,.tccc-analytics-grid{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-freshness{display:none}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
+            '@media(max-width:800px){#tccc-overlay{padding:6px}.tccc-modal{margin:6px auto}.tccc-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-grid2{grid-template-columns:1fr}.tccc-settings-grid{grid-template-columns:1fr}.tccc-cash-equation{grid-template-columns:1fr}.tccc-cash-equation>b{display:none}.tccc-training-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-training-log-row{grid-template-columns:80px minmax(0,1fr)}.tccc-training-log-row time{grid-column:2}.tccc-effectiveness-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-employee-detail-head{flex-direction:column}.tccc-trend-note{text-align:left}.tccc-position-mix,.tccc-recruit-status{grid-template-columns:1fr}.tccc-staffing-editor{grid-template-columns:1fr}.tccc-optimizer-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-manager-callout{grid-template-columns:1fr}.tccc-prepay-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-brief-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tccc-modal main{padding:10px}}',
+            '@media(max-width:480px){#tccc-launch{right:10px;bottom:72px}.tccc-cards{grid-template-columns:1fr}.tccc-attention{grid-template-columns:1fr}.tccc-prepay-grid{grid-template-columns:1fr}.tccc-brief-grid{grid-template-columns:1fr}.tccc-overview-trend,.tccc-analytics-grid{grid-template-columns:1fr}.tccc-modal header{min-height:82px;padding:14px 16px}.tccc-titleblock{gap:5px}.tccc-freshness{display:none}.tccc-modal h2{font-size:20px!important}.tccc-modal main{padding:10px}.tccc-modal td{font-size:12px!important}.tccc-modal th{font-size:9px!important}}'
         ].join('\n');
         document.head.appendChild(style);
     }
