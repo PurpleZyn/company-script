@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      1.1.0
+// @version      1.1.1
 // @description  Complete local-first director dashboard for Torn companies: finances, staff, training, dues, stock, recruiting, optimization, alerts, and analytics.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '1.1.0',
+        version: '1.1.1',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -1615,6 +1615,30 @@
             removeAutoPrepaySource(sourceKey);
 
             const existing = ledger[key] || {};
+
+            // v1.0/v1.0.x stored the current month's automatic payment directly in
+            // the monthly ledger without an allocation source. When upgrading to
+            // v1.1, treating that legacy AUTO record as a separate payment would
+            // push every newly calculated month one month too far into the future.
+            // Clear only that legacy scanner-owned status, then rebuild the same
+            // payment from the current Torn logs using the new allocation model.
+            const isLegacyCurrentAuto = !!(
+                existing.auto &&
+                existing.paid &&
+                !existing.manualOverride &&
+                !existing.prepaidManual &&
+                !existing.prepaid &&
+                !existing.prepaySourceKey &&
+                String(existing.method || '').indexOf('AUTO ·') === 0
+            );
+
+            if (isLegacyCurrentAuto) {
+                existing.paid = false;
+                existing.paidAt = null;
+                existing.method = '';
+                existing.auto = false;
+            }
+
             existing.receivedQty = aggregate.quantity;
             existing.detectedLogs = aggregate.logIds;
             existing.detectedMessages = aggregate.messages;
