@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 1.0.1
+**Current version:** 1.1.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v1.0.0 does
+## What v1.1.0 does
 
 ### Overview
 - Director Brief combining finances, training, dues, employee issues, stock risk, recruiting, staffing, and role optimization
@@ -105,6 +105,10 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Automatic scanning of direct Item Receive logs for Erotic DVD #366
 - Only current employees + matching keywords count toward dues
 - Multiple qualifying sends are accumulated toward the monthly requirement
+- Extra full monthly quantities automatically roll forward into future prepaid months
+- +1, +3, and custom manual future-prepay controls
+- Paid-through month and consecutive future coverage shown per employee
+- Upcoming prepaid-month summary
 - Manual paid/unpaid overrides remain available
 - Reset-month control clears the current ledger and ignores earlier qualifying sends
 - Optional separate Custom log-only API key
