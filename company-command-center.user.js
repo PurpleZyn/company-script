@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Command Center
 // @namespace    https://github.com/PurpleZyn/company-script
-// @version      1.1.1
+// @version      1.2.0
 // @description  Complete local-first director dashboard for Torn companies: finances, staff, training, dues, stock, recruiting, optimization, alerts, and analytics.
 // @author       PurpleZyn
 // @match        https://www.torn.com/*
@@ -20,7 +20,7 @@
 
     const APP = {
         name: 'Company Command Center',
-        version: '1.1.1',
+        version: '1.2.0',
         storagePrefix: 'tccc_',
         apiBase: 'https://api.torn.com/v2',
         comment: 'company-command-center'
@@ -1486,6 +1486,7 @@
         const key = String(employeeId);
         const record = ledger[key] || {};
         delete record.manualOverride;
+        record.updatedAt = Math.floor(Date.now() / 1000);
         ledger[key] = record;
         saveDues();
         applyAutomaticDuesMatches(state.duesScan.logs || []);
@@ -1550,7 +1551,8 @@
                     autoPrepay: true,
                     prepaidManual: false,
                     prepaySourceKey: sourceKey,
-                    prepayOriginMonth: month
+                    prepayOriginMonth: month,
+                    updatedAt: Math.floor(Date.now() / 1000)
                 });
                 allocated.push(targetMonth);
                 remaining -= 1;
@@ -1790,7 +1792,8 @@
                     prepaid: true,
                     prepaidManual: true,
                     autoPrepay: false,
-                    prepayOriginMonth: origin
+                    prepayOriginMonth: origin,
+                    updatedAt: now
                 });
                 remaining -= 1;
             }
@@ -1844,7 +1847,8 @@
                 paidAt: null,
                 method: 'Manual override: unpaid',
                 manualOverride: 'unpaid',
-                auto: false
+                auto: false,
+                updatedAt: Math.floor(Date.now() / 1000)
             });
         } else {
             ledger[key] = Object.assign({}, existing, {
@@ -3358,9 +3362,11 @@
             '<h3>Automatic eDVD scanner</h3>' +
             '<label>Optional dues log API key <input id="tccc-dues-api-key" type="password" value="' + esc(state.settings.duesApiKey) + '" placeholder="Custom key: User → Log → Item receive (4103)"></label>' +
             '<div class="tccc-note"><strong>Recommended security setup:</strong> Keep your normal company key as-is. Create a separate Custom Torn key for this field that grants only User → Log access restricted to Item receive (4103). If this field is blank, the scanner will try your primary key.</div>' +
-            '<div class="tccc-setting-actions"><button id="tccc-save-settings" class="primary">Save & Refresh</button><button id="tccc-export">Export local data</button><button id="tccc-import">Import local data</button></div>' +
-            '<input id="tccc-import-file" type="file" accept=".json,application/json" style="display:none">' +
-            '<div class="tccc-note">API keys are stored by the userscript manager when available and are sent only to api.torn.com. API keys are never included in exported backups or committed to GitHub.</div>' +
+            '<div class="tccc-setting-actions"><button id="tccc-save-settings" class="primary">Save & Refresh</button><button id="tccc-export">Export JSON backup</button><button id="tccc-merge-import">Merge JSON backup</button><button id="tccc-restore-import">Restore / Replace</button><button id="tccc-export-excel">Export Excel report</button></div>' +
+            '<input id="tccc-merge-import-file" type="file" accept=".json,application/json" style="display:none">' +
+            '<input id="tccc-restore-import-file" type="file" accept=".json,application/json" style="display:none">' +
+            '<div class="tccc-note"><strong>Moving data between devices:</strong> use <b>Merge JSON backup</b> when bringing phone/weekend data into another device. It combines historical days, dues/prepayments, and training history instead of replacing the destination file. Use <b>Restore / Replace</b> only when you intentionally want the backup to become the destination device\'s full local dataset. Excel exports are read-only sharing reports and cannot be imported back into the script.</div>' +
+            '<div class="tccc-note">API keys are stored by the userscript manager when available and are sent only to api.torn.com. API keys are never included in JSON backups, Excel reports, or committed to GitHub.</div>' +
             '</section>';
     }
 
@@ -3550,10 +3556,29 @@
         const exportBtn = document.getElementById('tccc-export');
         if (exportBtn) exportBtn.addEventListener('click', exportData);
 
-        const importBtn = document.getElementById('tccc-import');
-        const importFile = document.getElementById('tccc-import-file');
-        if (importBtn && importFile) importBtn.addEventListener('click', function () { importFile.click(); });
-        if (importFile) importFile.addEventListener('change', importData);
+        const excelBtn = document.getElementById('tccc-export-excel');
+        if (excelBtn) excelBtn.addEventListener('click', exportExcelReport);
+
+        const mergeImportBtn = document.getElementById('tccc-merge-import');
+        const mergeImportFile = document.getElementById('tccc-merge-import-file');
+        if (mergeImportBtn && mergeImportFile) mergeImportBtn.addEventListener('click', function () { mergeImportFile.click(); });
+        if (mergeImportFile) mergeImportFile.addEventListener('change', mergeImportData);
+
+        const restoreImportBtn = document.getElementById('tccc-restore-import');
+        const restoreImportFile = document.getElementById('tccc-restore-import-file');
+        if (restoreImportBtn && restoreImportFile) restoreImportBtn.addEventListener('click', function () { restoreImportFile.click(); });
+        if (restoreImportFile) restoreImportFile.addEventListener('change', restoreImportData);
+    }
+
+    function downloadBlob(blob, filename) {
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     }
 
     function exportData() {
@@ -3572,22 +3597,882 @@
             trainingRotation: state.trainingRotation
         };
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = 'torn-company-command-center-backup-' + tctDay() + '.json';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(function () { URL.revokeObjectURL(link.href); }, 500);
+        downloadBlob(blob, 'torn-company-command-center-backup-' + tctDay() + '.json');
     }
 
-    function importData(event) {
-        const file = event.target.files && event.target.files[0];
+    function xlsxXmlEscape(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
+    }
+
+    function xlsxColumnName(index) {
+        let n = index + 1;
+        let name = '';
+        while (n > 0) {
+            const remainder = (n - 1) % 26;
+            name = String.fromCharCode(65 + remainder) + name;
+            n = Math.floor((n - 1) / 26);
+        }
+        return name;
+    }
+
+    function xlsxCell(value, style) {
+        return { value: value, style: style == null ? 8 : style };
+    }
+
+    function xlsxHeader(values) {
+        return values.map(function (value) { return xlsxCell(value, 3); });
+    }
+
+    function xlsxSection(title, columns) {
+        const row = [xlsxCell(title, 2)];
+        for (let i = 1; i < columns; i += 1) row.push(xlsxCell('', 2));
+        return row;
+    }
+
+    function xlsxSheetXml(sheet) {
+        const rows = sheet.rows || [];
+        const widths = sheet.widths || [];
+        const merges = sheet.merges || [];
+        const freezeRows = Math.max(0, num(sheet.freezeRows));
+        const maxCols = rows.reduce(function (max, row) {
+            return Math.max(max, row ? row.length : 0);
+        }, 1);
+        const maxRows = Math.max(1, rows.length);
+
+        let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+            '<dimension ref="A1:' + xlsxColumnName(maxCols - 1) + maxRows + '">';
+
+        // Correct the self-closing dimension generated above.
+        xml = xml.replace('">', '"/>');
+
+        xml += '<sheetViews><sheetView workbookViewId="0">';
+        if (freezeRows > 0) {
+            xml += '<pane ySplit="' + freezeRows + '" topLeftCell="A' + (freezeRows + 1) +
+                '" activePane="bottomLeft" state="frozen"/>';
+        }
+        xml += '</sheetView></sheetViews>';
+
+        if (widths.length) {
+            xml += '<cols>';
+            widths.forEach(function (width, index) {
+                xml += '<col min="' + (index + 1) + '" max="' + (index + 1) +
+                    '" width="' + Math.max(6, num(width) || 12) + '" customWidth="1"/>';
+            });
+            xml += '</cols>';
+        }
+
+        xml += '<sheetData>';
+        rows.forEach(function (row, rowIndex) {
+            xml += '<row r="' + (rowIndex + 1) + '">';
+            (row || []).forEach(function (rawCell, colIndex) {
+                const cell = rawCell && typeof rawCell === 'object' &&
+                    Object.prototype.hasOwnProperty.call(rawCell, 'value') ?
+                    rawCell : xlsxCell(rawCell, 8);
+                const value = cell.value;
+                if (value === undefined || value === null || value === '') return;
+
+                const ref = xlsxColumnName(colIndex) + (rowIndex + 1);
+                const style = Math.max(0, Math.floor(num(cell.style)));
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                    xml += '<c r="' + ref + '" s="' + style + '"><v>' + value + '</v></c>';
+                } else if (typeof value === 'boolean') {
+                    xml += '<c r="' + ref + '" s="' + style + '" t="b"><v>' + (value ? 1 : 0) + '</v></c>';
+                } else {
+                    xml += '<c r="' + ref + '" s="' + style + '" t="inlineStr"><is><t xml:space="preserve">' +
+                        xlsxXmlEscape(value) + '</t></is></c>';
+                }
+            });
+            xml += '</row>';
+        });
+        xml += '</sheetData>';
+
+        if (merges.length) {
+            xml += '<mergeCells count="' + merges.length + '">';
+            merges.forEach(function (merge) {
+                xml += '<mergeCell ref="' + xlsxXmlEscape(merge) + '"/>';
+            });
+            xml += '</mergeCells>';
+        }
+
+        xml += '</worksheet>';
+        return xml;
+    }
+
+    function xlsxStylesXml() {
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+            '<numFmts count="3">' +
+            '<numFmt numFmtId="164" formatCode="$#,##0;[Red]-$#,##0"/>' +
+            '<numFmt numFmtId="165" formatCode="0.0%"/>' +
+            '<numFmt numFmtId="166" formatCode="#,##0.0"/>' +
+            '</numFmts>' +
+            '<fonts count="3">' +
+            '<font><sz val="11"/><name val="Calibri"/><family val="2"/></font>' +
+            '<font><b/><sz val="16"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/></font>' +
+            '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/></font>' +
+            '</fonts>' +
+            '<fills count="4">' +
+            '<fill><patternFill patternType="none"/></fill>' +
+            '<fill><patternFill patternType="gray125"/></fill>' +
+            '<fill><patternFill patternType="solid"><fgColor rgb="FF5C36A8"/><bgColor indexed="64"/></patternFill></fill>' +
+            '<fill><patternFill patternType="solid"><fgColor rgb="FF2B2334"/><bgColor indexed="64"/></patternFill></fill>' +
+            '</fills>' +
+            '<borders count="2">' +
+            '<border><left/><right/><top/><bottom/><diagonal/></border>' +
+            '<border><left style="thin"><color rgb="FFD8D1E0"/></left><right style="thin"><color rgb="FFD8D1E0"/></right><top style="thin"><color rgb="FFD8D1E0"/></top><bottom style="thin"><color rgb="FFD8D1E0"/></bottom><diagonal/></border>' +
+            '</borders>' +
+            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+            '<cellXfs count="9">' +
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+            '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>' +
+            '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>' +
+            '<xf numFmtId="0" fontId="2" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment wrapText="1"/></xf>' +
+            '<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
+            '<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
+            '<xf numFmtId="3" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
+            '<xf numFmtId="166" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
+            '</cellXfs>' +
+            '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+            '</styleSheet>';
+    }
+
+    function xlsxCrc32(bytes) {
+        if (!xlsxCrc32.table) {
+            const table = new Uint32Array(256);
+            for (let n = 0; n < 256; n += 1) {
+                let crc = n;
+                for (let k = 0; k < 8; k += 1) {
+                    crc = (crc & 1) ? (0xEDB88320 ^ (crc >>> 1)) : (crc >>> 1);
+                }
+                table[n] = crc >>> 0;
+            }
+            xlsxCrc32.table = table;
+        }
+
+        let crc = 0xFFFFFFFF;
+        for (let i = 0; i < bytes.length; i += 1) {
+            crc = xlsxCrc32.table[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+        }
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function xlsxLe16(value) {
+        const bytes = new Uint8Array(2);
+        new DataView(bytes.buffer).setUint16(0, value & 0xFFFF, true);
+        return bytes;
+    }
+
+    function xlsxLe32(value) {
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        return bytes;
+    }
+
+    function xlsxConcat(parts) {
+        const length = parts.reduce(function (total, part) { return total + part.length; }, 0);
+        const result = new Uint8Array(length);
+        let offset = 0;
+        parts.forEach(function (part) {
+            result.set(part, offset);
+            offset += part.length;
+        });
+        return result;
+    }
+
+    function xlsxDosDateTime(date) {
+        const d = date || new Date();
+        const year = Math.max(1980, d.getFullYear());
+        const dosTime = ((d.getHours() & 31) << 11) |
+            ((d.getMinutes() & 63) << 5) |
+            (Math.floor(d.getSeconds() / 2) & 31);
+        const dosDate = (((year - 1980) & 127) << 9) |
+            (((d.getMonth() + 1) & 15) << 5) |
+            (d.getDate() & 31);
+        return { time: dosTime, date: dosDate };
+    }
+
+    function xlsxZip(files) {
+        const encoder = new TextEncoder();
+        const localParts = [];
+        const centralParts = [];
+        let offset = 0;
+        const dos = xlsxDosDateTime(new Date());
+
+        files.forEach(function (file) {
+            const nameBytes = encoder.encode(file.name);
+            const dataBytes = typeof file.data === 'string' ? encoder.encode(file.data) : file.data;
+            const crc = xlsxCrc32(dataBytes);
+            const flags = 0x0800;
+
+            const localHeader = xlsxConcat([
+                xlsxLe32(0x04034B50),
+                xlsxLe16(20),
+                xlsxLe16(flags),
+                xlsxLe16(0),
+                xlsxLe16(dos.time),
+                xlsxLe16(dos.date),
+                xlsxLe32(crc),
+                xlsxLe32(dataBytes.length),
+                xlsxLe32(dataBytes.length),
+                xlsxLe16(nameBytes.length),
+                xlsxLe16(0),
+                nameBytes
+            ]);
+
+            localParts.push(localHeader, dataBytes);
+
+            const centralHeader = xlsxConcat([
+                xlsxLe32(0x02014B50),
+                xlsxLe16(20),
+                xlsxLe16(20),
+                xlsxLe16(flags),
+                xlsxLe16(0),
+                xlsxLe16(dos.time),
+                xlsxLe16(dos.date),
+                xlsxLe32(crc),
+                xlsxLe32(dataBytes.length),
+                xlsxLe32(dataBytes.length),
+                xlsxLe16(nameBytes.length),
+                xlsxLe16(0),
+                xlsxLe16(0),
+                xlsxLe16(0),
+                xlsxLe16(0),
+                xlsxLe32(0),
+                xlsxLe32(offset),
+                nameBytes
+            ]);
+            centralParts.push(centralHeader);
+            offset += localHeader.length + dataBytes.length;
+        });
+
+        const central = xlsxConcat(centralParts);
+        const local = xlsxConcat(localParts);
+        const end = xlsxConcat([
+            xlsxLe32(0x06054B50),
+            xlsxLe16(0),
+            xlsxLe16(0),
+            xlsxLe16(files.length),
+            xlsxLe16(files.length),
+            xlsxLe32(central.length),
+            xlsxLe32(local.length),
+            xlsxLe16(0)
+        ]);
+
+        return new Blob([local, central, end], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+    }
+
+    function buildExcelReportSheets() {
+        const companyName = (state.profile && state.profile.name) || 'Torn Company';
+        const companyType = state.profile && state.profile.type ? state.profile.type.name : '';
+        const finance = state.profile ? financeSummary() : null;
+        const plan = state.profile ? stockCapacityPlan() : null;
+        const currentLedger = state.dues[currentMonth()] || {};
+        const dueEmployees = state.profile ? duesEmployees() : [];
+        const paidCount = dueEmployees.filter(function (employee) {
+            return currentLedger[String(employee.id)] && currentLedger[String(employee.id)].paid;
+        }).length;
+
+        const summaryRows = [
+            [xlsxCell(companyName + ' — Company Command Center Report', 1), '', '', ''],
+            ['Generated', new Date().toLocaleString(), '', ''],
+            ['Script version', APP.version, '', ''],
+            ['', '', '', ''],
+            xlsxSection('Company Summary', 4),
+            xlsxHeader(['Metric', 'Value', 'Metric', 'Value']),
+            ['Company type', companyType || '—', 'Rating', state.profile ? num(state.profile.rating) + '★' : '—'],
+            ['Employees', state.employees.length, 'Applications', state.applications.length],
+            ['Efficiency', state.profile ? num(state.profile.efficiency) + '%' : '—', 'Environment', state.profile ? num(state.profile.environment) + '%' : '—'],
+            ['Popularity', state.profile ? num(state.profile.popularity) + '%' : '—', 'Available trains', state.profile ? num(state.profile.trains) : '—'],
+            ['', '', '', ''],
+            xlsxSection('Current Financial Snapshot', 4),
+            xlsxHeader(['Metric', 'Value', 'Metric', 'Value']),
+            ['Gross sales', finance ? xlsxCell(finance.revenue, 4) : '—', 'Estimated COGS', finance ? xlsxCell(finance.cogs, 4) : '—'],
+            ['Gross profit', finance ? xlsxCell(finance.grossProfit, 4) : '—', 'Advertising', finance ? xlsxCell(finance.advertising, 4) : '—'],
+            ['Wages', finance ? xlsxCell(finance.wages, 4) : '—', 'Other daily cost', finance ? xlsxCell(finance.extra, 4) : '—'],
+            ['Operating profit', finance ? xlsxCell(finance.operatingProfit, 4) : '—', 'Operating margin', finance ? xlsxCell(finance.operatingMargin / 100, 5) : '—'],
+            ['Company funds', state.profile ? xlsxCell(num(state.profile.funds), 4) : '—', 'Break-even sales', finance ? xlsxCell(finance.breakEvenRevenue, 4) : '—'],
+            ['', '', '', ''],
+            xlsxSection('Management Summary', 4),
+            xlsxHeader(['Metric', 'Value', 'Metric', 'Value']),
+            ['Current dues paid', paidCount + ' / ' + dueEmployees.length, 'Historical days', Object.keys(state.snapshots).length],
+            ['Stock committed', plan ? xlsxCell(plan.committedUnits, 6) : '—', 'Stock capacity', plan ? xlsxCell(plan.capacity, 6) : '—'],
+            ['Free stock capacity', plan ? xlsxCell(plan.freeCapacity, 6) : '—', 'Capacity-safe reorder', plan ? xlsxCell(plan.suggestedTotal, 6) : '—'],
+            ['Ideal stock target', state.settings.stockTargetDays + ' days', 'Balanced plan cover', plan ? xlsxCell(plan.effectiveTargetDays, 7) : '—']
+        ];
+
+        const dailyRows = [xlsxHeader([
+            'TCT Day', 'Sales', 'COGS', 'Gross Profit', 'Advertising', 'Wages', 'Other Cost',
+            'Operating Profit', 'Operating Margin', 'Funds', 'Adjusted Cash Δ', 'Rating',
+            'Efficiency', 'Environment', 'Popularity', 'Trains', 'Captured At'
+        ])];
+        Object.keys(state.snapshots).sort().forEach(function (day) {
+            const s = state.snapshots[day] || {};
+            const revenue = num(s.revenue);
+            const op = s.operatingProfit !== undefined ? num(s.operatingProfit) : num(s.net);
+            dailyRows.push([
+                day,
+                xlsxCell(revenue, 4),
+                xlsxCell(num(s.cogs), 4),
+                xlsxCell(s.grossProfit !== undefined ? num(s.grossProfit) : revenue - num(s.cogs), 4),
+                xlsxCell(num(s.advertising), 4),
+                xlsxCell(num(s.wages), 4),
+                xlsxCell(num(s.extra), 4),
+                xlsxCell(op, 4),
+                xlsxCell(revenue > 0 ? op / revenue : 0, 5),
+                xlsxCell(num(s.funds), 4),
+                xlsxCell(num(s.adjustedCashChange), 4),
+                num(s.rating),
+                num(s.efficiency),
+                num(s.environment),
+                num(s.popularity),
+                num(s.trains),
+                s.capturedAt ? formatDate(s.capturedAt) : ''
+            ]);
+        });
+
+        const employeeRows = [xlsxHeader([
+            'Employee', 'ID', 'Position', 'Wage', 'Days in Company', 'Total Effectiveness',
+            'Working Stats', 'Addiction', 'Inactivity', 'Management', 'Settled In', 'Merits'
+        ])];
+        state.employees.slice().sort(function (a, b) {
+            return String(a.name || '').localeCompare(String(b.name || ''));
+        }).forEach(function (employee) {
+            const eff = employee.effectiveness || {};
+            employeeRows.push([
+                employee.name || '',
+                String(employee.id || ''),
+                (employee.position && employee.position.name) || '',
+                xlsxCell(num(employee.wage), 4),
+                xlsxCell(num(employee.days_in_company), 6),
+                xlsxCell(num(eff.total), 6),
+                xlsxCell(num(eff.working_stats), 6),
+                xlsxCell(num(eff.addiction), 6),
+                xlsxCell(num(eff.inactivity), 6),
+                xlsxCell(num(eff.management), 6),
+                xlsxCell(num(eff.settled_in), 6),
+                xlsxCell(num(eff.merits), 6)
+            ]);
+        });
+
+        const employeeHistoryRows = [xlsxHeader([
+            'TCT Day', 'Employee', 'ID', 'Position', 'Wage', 'Days in Company',
+            'Total Effectiveness', 'Working Stats', 'Addiction', 'Inactivity', 'Management', 'Captured At'
+        ])];
+        Object.keys(state.employeeHistory).sort().forEach(function (day) {
+            const snapshot = state.employeeHistory[day] || {};
+            Object.keys(snapshot.employees || {}).forEach(function (id) {
+                const employee = snapshot.employees[id] || {};
+                const eff = employee.effectiveness || {};
+                employeeHistoryRows.push([
+                    day, employee.name || '', String(employee.id || id), employee.position || '',
+                    xlsxCell(num(employee.wage), 4), xlsxCell(num(employee.daysInCompany), 6),
+                    xlsxCell(num(eff.total), 6), xlsxCell(num(eff.working_stats), 6),
+                    xlsxCell(num(eff.addiction), 6), xlsxCell(num(eff.inactivity), 6),
+                    xlsxCell(num(eff.management), 6),
+                    snapshot.capturedAt ? formatDate(snapshot.capturedAt) : ''
+                ]);
+            });
+        });
+
+        const stockRows = [xlsxHeader([
+            'Item', 'Status', 'In Stock', 'On Order', 'Today Sold', 'Avg / Day',
+            'On-Hand Cover', 'Total Cover', 'Suggested Reorder', 'After Plan', 'Projected Runout'
+        ])];
+        if (plan) {
+            plan.rows.slice().sort(function (a, b) {
+                const aDays = Number.isFinite(a.forecast.totalDays) ? a.forecast.totalDays : 999999;
+                const bDays = Number.isFinite(b.forecast.totalDays) ? b.forecast.totalDays : 999999;
+                return aDays - bDays;
+            }).forEach(function (row) {
+                stockRows.push([
+                    row.item.name || '',
+                    String(row.status || '').toUpperCase(),
+                    xlsxCell(num(row.item.in_stock), 6),
+                    xlsxCell(num(row.item.on_order), 6),
+                    xlsxCell(num(row.item.sold_amount), 6),
+                    xlsxCell(num(row.forecast.avgDaily), 7),
+                    Number.isFinite(row.forecast.onHandDays) ? xlsxCell(row.forecast.onHandDays, 7) : '—',
+                    Number.isFinite(row.forecast.totalDays) ? xlsxCell(row.forecast.totalDays, 7) : '—',
+                    xlsxCell(num(row.suggested), 6),
+                    Number.isFinite(row.afterPlanDays) ? xlsxCell(row.afterPlanDays, 7) : '—',
+                    formatForecastDate(row.forecast.runoutAt)
+                ]);
+            });
+        }
+
+        const stockHistoryRows = [xlsxHeader([
+            'TCT Day', 'Item', 'In Stock', 'On Order', 'Sold', 'Sold Worth', 'Cost', 'Selling Price', 'Captured At'
+        ])];
+        Object.keys(state.stockHistory).sort().forEach(function (day) {
+            const snapshot = state.stockHistory[day] || {};
+            Object.keys(snapshot.items || {}).forEach(function (key) {
+                const item = snapshot.items[key] || {};
+                stockHistoryRows.push([
+                    day, item.name || key,
+                    xlsxCell(num(item.inStock), 6),
+                    xlsxCell(num(item.onOrder), 6),
+                    xlsxCell(num(item.sold), 6),
+                    xlsxCell(num(item.soldWorth), 4),
+                    xlsxCell(num(item.cost), 4),
+                    xlsxCell(num(item.sellingPrice), 4),
+                    snapshot.capturedAt ? formatDate(snapshot.capturedAt) : ''
+                ]);
+            });
+        });
+
+        const employeeNameById = {};
+        state.employees.forEach(function (employee) {
+            employeeNameById[String(employee.id)] = employee.name || String(employee.id);
+        });
+
+        const duesRows = [xlsxHeader([
+            'Month', 'Employee', 'ID', 'Status', 'Paid At', 'Method', 'Detected eDVDs',
+            'Prepaid', 'Manual Override', 'Prepay Origin', 'Updated At'
+        ])];
+        Object.keys(state.dues).sort().forEach(function (month) {
+            const ledger = state.dues[month] || {};
+            Object.keys(ledger).sort().forEach(function (id) {
+                const record = ledger[id] || {};
+                duesRows.push([
+                    month,
+                    employeeNameById[id] || id,
+                    id,
+                    record.paid ? 'PAID' : 'UNPAID',
+                    record.paidAt ? formatDate(record.paidAt) : '',
+                    record.method || '',
+                    xlsxCell(num(record.receivedQty), 6),
+                    record.prepaid || record.prepaidManual || record.autoPrepay ? 'YES' : '',
+                    record.manualOverride || '',
+                    record.prepayOriginMonth || '',
+                    record.updatedAt ? formatDate(record.updatedAt) : ''
+                ]);
+            });
+        });
+
+        const trainingQueueRows = [xlsxHeader(['Queue #', 'Employee', 'ID', 'Last Seen Train'])];
+        (state.trainingRotation.order || []).forEach(function (id, index) {
+            trainingQueueRows.push([
+                index + 1,
+                employeeNameById[String(id)] || String(id),
+                String(id),
+                state.trainingRotation.lastSeen && state.trainingRotation.lastSeen[String(id)] ?
+                    formatDate(state.trainingRotation.lastSeen[String(id)]) : ''
+            ]);
+        });
+
+        const trainingHistoryRows = [xlsxHeader(['Type', 'Employee', 'ID', 'Event Time', 'Detected At'])];
+        (state.trainingRotation.history || []).slice().sort(function (a, b) {
+            return num(b.detectedAt || b.timestamp) - num(a.detectedAt || a.timestamp);
+        }).forEach(function (entry) {
+            trainingHistoryRows.push([
+                String(entry.type || '').toUpperCase(),
+                entry.name || employeeNameById[String(entry.id)] || '',
+                String(entry.id || ''),
+                entry.timestamp ? formatDate(entry.timestamp) : '',
+                entry.detectedAt ? formatDate(entry.detectedAt) : ''
+            ]);
+        });
+
+        const recruitingRows = [xlsxHeader([
+            'Applicant', 'ID', 'Level', 'Manual Labor', 'Intelligence', 'Endurance',
+            'Total Work Stats', 'Status', 'Expires', 'Message'
+        ])];
+        state.applications.forEach(function (application) {
+            const player = application.player || {};
+            const stats = player.stats || {};
+            recruitingRows.push([
+                player.name || '',
+                String(player.id || ''),
+                num(player.level),
+                xlsxCell(num(stats.manual_labor), 6),
+                xlsxCell(num(stats.intelligence), 6),
+                xlsxCell(num(stats.endurance), 6),
+                xlsxCell(workStatsTotal(stats), 6),
+                application.status || '',
+                application.expires_at ? formatDate(application.expires_at) : '',
+                application.message || ''
+            ]);
+        });
+
+        const configRows = [
+            xlsxHeader(['Setting', 'Value']),
+            ['Monthly eDVD requirement', state.settings.edvdQty],
+            ['Dues due day', state.settings.dueDay],
+            ['Dues keywords', state.settings.duesKeywords],
+            ['Exclude director from dues', state.settings.excludeDirector ? 'Yes' : 'No'],
+            ['Other daily company cost', xlsxCell(num(state.settings.extraDailyCost), 4)],
+            ['Stock target days', state.settings.stockTargetDays],
+            ['Low-stock warning days', state.settings.stockWarningDays],
+            ['Maximum stock capacity', xlsxCell(num(state.settings.stockCapacity), 6)],
+            ['', ''],
+            xlsxHeader(['Staffing Position', 'Target'])
+        ];
+        Object.keys(state.staffingTargets || {}).sort().forEach(function (position) {
+            configRows.push([position, xlsxCell(num(state.staffingTargets[position]), 6)]);
+        });
+
+        return [
+            { name: 'Summary', rows: summaryRows, widths: [27, 22, 27, 22], merges: ['A1:D1'] },
+            { name: 'Daily History', rows: dailyRows, widths: [13, 15, 15, 15, 15, 13, 13, 17, 15, 16, 17, 10, 11, 12, 12, 10, 22], freezeRows: 1 },
+            { name: 'Employees', rows: employeeRows, widths: [20, 13, 20, 14, 16, 18, 15, 12, 12, 13, 12, 10], freezeRows: 1 },
+            { name: 'Employee History', rows: employeeHistoryRows, widths: [13, 20, 13, 20, 14, 16, 18, 15, 12, 12, 13, 22], freezeRows: 1 },
+            { name: 'Stock', rows: stockRows, widths: [24, 12, 13, 13, 13, 13, 15, 15, 17, 14, 18], freezeRows: 1 },
+            { name: 'Stock History', rows: stockHistoryRows, widths: [13, 24, 13, 13, 13, 16, 14, 14, 22], freezeRows: 1 },
+            { name: 'Dues & Prepayments', rows: duesRows, widths: [13, 20, 13, 12, 22, 34, 16, 12, 17, 15, 22], freezeRows: 1 },
+            { name: 'Training Queue', rows: trainingQueueRows, widths: [10, 20, 13, 22], freezeRows: 1 },
+            { name: 'Training History', rows: trainingHistoryRows, widths: [12, 20, 13, 22, 22], freezeRows: 1 },
+            { name: 'Recruiting', rows: recruitingRows, widths: [20, 13, 10, 15, 15, 15, 18, 13, 22, 40], freezeRows: 1 },
+            { name: 'Configuration', rows: configRows, widths: [30, 28], freezeRows: 1 }
+        ];
+    }
+
+    function exportExcelReport() {
+        try {
+            const sheets = buildExcelReportSheets();
+            const files = [];
+            const sheetOverrides = [];
+            const workbookSheets = [];
+            const workbookRels = [];
+
+            sheets.forEach(function (sheet, index) {
+                const number = index + 1;
+                files.push({
+                    name: 'xl/worksheets/sheet' + number + '.xml',
+                    data: xlsxSheetXml(sheet)
+                });
+                sheetOverrides.push(
+                    '<Override PartName="/xl/worksheets/sheet' + number +
+                    '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                );
+                workbookSheets.push(
+                    '<sheet name="' + xlsxXmlEscape(sheet.name) + '" sheetId="' + number + '" r:id="rId' + number + '"/>'
+                );
+                workbookRels.push(
+                    '<Relationship Id="rId' + number +
+                    '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' +
+                    number + '.xml"/>'
+                );
+            });
+
+            const stylesRelId = sheets.length + 1;
+
+            files.push({
+                name: '[Content_Types].xml',
+                data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+                    '<Default Extension="xml" ContentType="application/xml"/>' +
+                    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+                    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+                    sheetOverrides.join('') +
+                    '</Types>'
+            });
+
+            files.push({
+                name: '_rels/.rels',
+                data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+                    '</Relationships>'
+            });
+
+            files.push({
+                name: 'xl/workbook.xml',
+                data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+                    '<sheets>' + workbookSheets.join('') + '</sheets></workbook>'
+            });
+
+            files.push({
+                name: 'xl/_rels/workbook.xml.rels',
+                data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                    workbookRels.join('') +
+                    '<Relationship Id="rId' + stylesRelId +
+                    '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+                    '</Relationships>'
+            });
+
+            files.push({ name: 'xl/styles.xml', data: xlsxStylesXml() });
+
+            const blob = xlsxZip(files);
+            const safeName = String((state.profile && state.profile.name) || 'company')
+                .replace(/[^a-z0-9_-]+/gi, '-')
+                .replace(/^-+|-+$/g, '')
+                .toLowerCase() || 'company';
+            downloadBlob(blob, safeName + '-command-center-' + tctDay() + '.xlsx');
+        } catch (error) {
+            state.error = 'Excel export failed: ' + (error && error.message ? error.message : String(error));
+            render();
+        }
+    }
+
+    function isBackupPayload(payload) {
+        if (!payload || typeof payload !== 'object') return false;
+        return !!(
+            payload.snapshots ||
+            payload.employeeHistory ||
+            payload.stockHistory ||
+            payload.dues ||
+            payload.trainingRotation ||
+            payload.staffingTargets
+        );
+    }
+
+    function mergeCapturedDayMap(localMap, incomingMap, limit) {
+        const result = Object.assign({}, localMap || {});
+        Object.keys(incomingMap || {}).forEach(function (day) {
+            const incoming = incomingMap[day];
+            const local = result[day];
+            if (!local || num(incoming && incoming.capturedAt) >= num(local && local.capturedAt)) {
+                result[day] = incoming;
+            }
+        });
+
+        const days = Object.keys(result).sort();
+        while (days.length > limit) delete result[days.shift()];
+        return result;
+    }
+
+    function duesRecordTime(record) {
+        if (!record) return 0;
+        return Math.max(num(record.updatedAt), num(record.paidAt));
+    }
+
+    function duesRecordPriority(record) {
+        if (!record) return -1;
+        if (record.manualOverride) return 50;
+        if (record.prepaidManual) return 45;
+        if (String(record.method || '').toLowerCase().indexOf('manual') !== -1) return 40;
+        if (record.autoPrepay) return 30;
+        if (record.auto) return 20;
+        if (record.paid) return 10;
+        return 0;
+    }
+
+    function mergeDuesRecord(localRecord, incomingRecord) {
+        if (!localRecord) return Object.assign({}, incomingRecord || {});
+        if (!incomingRecord) return Object.assign({}, localRecord || {});
+
+        const localTime = duesRecordTime(localRecord);
+        const incomingTime = duesRecordTime(incomingRecord);
+        const localPriority = duesRecordPriority(localRecord);
+        const incomingPriority = duesRecordPriority(incomingRecord);
+
+        let winner = localRecord;
+        let loser = incomingRecord;
+
+        if (incomingTime > localTime ||
+            (incomingTime === localTime && incomingPriority > localPriority) ||
+            (incomingTime === localTime && incomingPriority === localPriority)) {
+            winner = incomingRecord;
+            loser = localRecord;
+        }
+
+        const merged = Object.assign({}, loser, winner);
+        merged.receivedQty = Math.max(num(localRecord.receivedQty), num(incomingRecord.receivedQty));
+
+        const logs = new Set([].concat(localRecord.detectedLogs || [], incomingRecord.detectedLogs || []).map(String));
+        if (logs.size) merged.detectedLogs = Array.from(logs);
+
+        const messages = new Set([].concat(localRecord.detectedMessages || [], incomingRecord.detectedMessages || []).map(String));
+        if (messages.size) merged.detectedMessages = Array.from(messages);
+
+        return merged;
+    }
+
+    function mergeDuesLedgers(localDues, incomingDues) {
+        const result = {};
+        const months = new Set(Object.keys(localDues || {}).concat(Object.keys(incomingDues || {})));
+
+        months.forEach(function (month) {
+            const localLedger = (localDues && localDues[month]) || {};
+            const incomingLedger = (incomingDues && incomingDues[month]) || {};
+            const ids = new Set(Object.keys(localLedger).concat(Object.keys(incomingLedger)));
+            result[month] = {};
+
+            ids.forEach(function (id) {
+                result[month][id] = mergeDuesRecord(localLedger[id], incomingLedger[id]);
+            });
+        });
+
+        return result;
+    }
+
+    function mergeResetBaselines(localMap, incomingMap) {
+        const result = Object.assign({}, localMap || {});
+        Object.keys(incomingMap || {}).forEach(function (month) {
+            result[month] = Math.max(num(result[month]), num(incomingMap[month]));
+        });
+        return result;
+    }
+
+    function trainingHistoryKey(entry) {
+        return [
+            String(entry && entry.type || ''),
+            String(entry && entry.id || ''),
+            String(num(entry && entry.timestamp)),
+            String(entry && entry.name || '')
+        ].join('|');
+    }
+
+    function mergeTrainingRotation(localRotation, incomingRotation) {
+        const local = Object.assign({
+            initialized: false, order: [], lastSeen: {}, history: [], updatedAt: 0
+        }, localRotation || {});
+        const incoming = Object.assign({
+            initialized: false, order: [], lastSeen: {}, history: [], updatedAt: 0
+        }, incomingRotation || {});
+
+        const incomingIsNewer = num(incoming.updatedAt) > num(local.updatedAt);
+        const order = (incomingIsNewer ? incoming.order : local.order || []).map(String);
+
+        const lastSeen = Object.assign({}, local.lastSeen || {});
+        Object.keys(incoming.lastSeen || {}).forEach(function (id) {
+            lastSeen[String(id)] = Math.max(num(lastSeen[String(id)]), num(incoming.lastSeen[id]));
+        });
+
+        const historyMap = new Map();
+        [].concat(local.history || [], incoming.history || []).forEach(function (entry) {
+            const key = trainingHistoryKey(entry);
+            const existing = historyMap.get(key);
+            if (!existing || num(entry.detectedAt || entry.timestamp) >= num(existing.detectedAt || existing.timestamp)) {
+                historyMap.set(key, entry);
+            }
+        });
+
+        const history = Array.from(historyMap.values()).sort(function (a, b) {
+            return num(b.detectedAt || b.timestamp) - num(a.detectedAt || a.timestamp);
+        }).slice(0, 50);
+
+        return {
+            initialized: !!(local.initialized || incoming.initialized),
+            order: order,
+            lastSeen: lastSeen,
+            history: history,
+            updatedAt: Math.max(num(local.updatedAt), num(incoming.updatedAt))
+        };
+    }
+
+    function mergeCompanySettings(incomingSettings) {
+        const keys = [
+            'duesKeywords', 'edvdQty', 'dueDay', 'excludeDirector', 'extraDailyCost',
+            'stockTargetDays', 'stockWarningDays', 'stockCapacity'
+        ];
+
+        keys.forEach(function (key) {
+            if (incomingSettings && incomingSettings[key] !== undefined) {
+                state.settings[key] = incomingSettings[key];
+            }
+        });
+    }
+
+    function mergeBackupPayload(payload) {
+        const before = {
+            snapshots: Object.keys(state.snapshots || {}).length,
+            employeeHistory: Object.keys(state.employeeHistory || {}).length,
+            stockHistory: Object.keys(state.stockHistory || {}).length,
+            duesMonths: Object.keys(state.dues || {}).length,
+            trainingEvents: (state.trainingRotation.history || []).length
+        };
+
+        state.snapshots = mergeCapturedDayMap(state.snapshots, payload.snapshots, 180);
+        state.employeeHistory = mergeCapturedDayMap(state.employeeHistory, payload.employeeHistory, 90);
+        state.stockHistory = mergeCapturedDayMap(state.stockHistory, payload.stockHistory, 90);
+        state.dues = mergeDuesLedgers(state.dues, payload.dues);
+        state.duesResetAt = mergeResetBaselines(state.duesResetAt, payload.duesResetAt);
+
+        if (payload.staffingTargets) {
+            state.staffingTargets = Object.assign({}, state.staffingTargets || {}, payload.staffingTargets);
+        }
+
+        if (payload.trainingRotation) {
+            state.trainingRotation = mergeTrainingRotation(state.trainingRotation, payload.trainingRotation);
+        }
+
+        mergeCompanySettings(payload.settings);
+
+        saveSnapshots();
+        saveEmployeeHistory();
+        saveStockHistory();
+        saveStaffingTargets();
+        saveDues();
+        store.set('trainingRotation', state.trainingRotation);
+        saveSettings();
+
+        return {
+            snapshotsAdded: Math.max(0, Object.keys(state.snapshots).length - before.snapshots),
+            employeeDaysAdded: Math.max(0, Object.keys(state.employeeHistory).length - before.employeeHistory),
+            stockDaysAdded: Math.max(0, Object.keys(state.stockHistory).length - before.stockHistory),
+            duesMonthsAdded: Math.max(0, Object.keys(state.dues).length - before.duesMonths),
+            trainingEventsAdded: Math.max(0, (state.trainingRotation.history || []).length - before.trainingEvents)
+        };
+    }
+
+    function mergeImportData(event) {
+        const input = event.target;
+        const file = input.files && input.files[0];
         if (!file) return;
+
         const reader = new FileReader();
         reader.onload = function () {
             try {
                 const payload = JSON.parse(reader.result);
+                if (!isBackupPayload(payload)) throw new Error('Not a Company Command Center backup.');
+
+                const summary = mergeBackupPayload(payload);
+                state.error = '';
+                render();
+
+                window.alert(
+                    'Backup merged successfully.\n\n' +
+                    'Historical days added: ' + summary.snapshotsAdded + '\n' +
+                    'Employee-history days added: ' + summary.employeeDaysAdded + '\n' +
+                    'Stock-history days added: ' + summary.stockDaysAdded + '\n' +
+                    'New dues months added: ' + summary.duesMonthsAdded + '\n' +
+                    'Training events added: ' + summary.trainingEventsAdded + '\n\n' +
+                    'Overlapping days were resolved using the newer captured snapshot. Your API keys and device-specific launcher/alert settings were kept.'
+                );
+            } catch (e) {
+                state.error = e && e.message ? 'Merge failed: ' + e.message : 'That backup file could not be merged.';
+                render();
+            } finally {
+                input.value = '';
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    function restoreImportData(event) {
+        const input = event.target;
+        const file = input.files && input.files[0];
+        if (!file) return;
+
+        const confirmed = window.confirm(
+            'Restore / Replace will overwrite this device\\'s local Company Command Center histories and management data with the selected backup.\\n\\n' +
+            'Your API keys will be preserved.\\n\\nUse Merge JSON Backup instead if you are combining phone/laptop history. Continue?'
+        );
+        if (!confirmed) {
+            input.value = '';
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = function () {
+            try {
+                const payload = JSON.parse(reader.result);
+                if (!isBackupPayload(payload)) throw new Error('Not a Company Command Center backup.');
+
                 if (payload.snapshots) state.snapshots = payload.snapshots;
                 if (payload.employeeHistory) state.employeeHistory = payload.employeeHistory;
                 if (payload.stockHistory) state.stockHistory = payload.stockHistory;
@@ -3596,6 +4481,7 @@
                 if (payload.dues) state.dues = payload.dues;
                 if (payload.duesResetAt) state.duesResetAt = payload.duesResetAt;
                 if (payload.trainingRotation) state.trainingRotation = Object.assign({}, state.trainingRotation, payload.trainingRotation);
+
                 if (payload.settings) {
                     const currentKey = state.settings.apiKey;
                     const currentDuesKey = state.settings.duesApiKey;
@@ -3604,6 +4490,7 @@
                         duesApiKey: currentDuesKey
                     });
                 }
+
                 saveSnapshots();
                 saveEmployeeHistory();
                 saveStockHistory();
@@ -3614,9 +4501,12 @@
                 saveSettings();
                 state.error = '';
                 render();
+                window.alert('Backup restored successfully.');
             } catch (e) {
-                state.error = 'That backup file could not be imported.';
+                state.error = e && e.message ? 'Restore failed: ' + e.message : 'That backup file could not be restored.';
                 render();
+            } finally {
+                input.value = '';
             }
         };
         reader.readAsText(file);
