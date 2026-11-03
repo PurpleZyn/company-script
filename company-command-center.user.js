@@ -3646,10 +3646,7 @@
 
         let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-            '<dimension ref="A1:' + xlsxColumnName(maxCols - 1) + maxRows + '">';
-
-        // Correct the self-closing dimension generated above.
-        xml = xml.replace('">', '"/>');
+            '<dimension ref="A1:' + xlsxColumnName(maxCols - 1) + maxRows + '"/>';
 
         xml += '<sheetViews><sheetView workbookViewId="0">';
         if (freezeRows > 0) {
@@ -4459,8 +4456,8 @@
         if (!file) return;
 
         const confirmed = window.confirm(
-            'Restore / Replace will overwrite this device\\'s local Company Command Center histories and management data with the selected backup.\\n\\n' +
-            'Your API keys will be preserved.\\n\\nUse Merge JSON Backup instead if you are combining phone/laptop history. Continue?'
+            'Restore / Replace will overwrite this device\'s local Company Command Center histories and management data with the selected backup.\n\n' +
+            'Your API keys will be preserved.\n\nUse Merge JSON Backup instead if you are combining phone/laptop history. Continue?'
         );
         if (!confirmed) {
             input.value = '';
