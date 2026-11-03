@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.2.0 - 2026-11-03
+
+Data portability and reporting upgrade.
+
+### Added
+- Native Excel `.xlsx` report export with no external spreadsheet library or CDN dependency.
+- Excel workbook includes separate formatted sheets for:
+  - Summary
+  - Daily History
+  - Employees
+  - Employee History
+  - Stock
+  - Stock History
+  - Dues & Prepayments
+  - Training Queue
+  - Training History
+  - Recruiting
+  - Configuration / staffing targets
+- JSON backup workflow is now split into **Merge JSON backup** and **Restore / Replace**.
+- Merge mode is designed for combining local histories from multiple devices, such as bringing weekend phone data into a work laptop.
+
+### Cross-device merge behavior
+- Daily company snapshots are combined by TCT date; when both devices have the same date, the snapshot with the newer `capturedAt` timestamp wins.
+- Employee-history and stock-history days use the same newer-snapshot rule.
+- Dues/prepayment ledgers are merged by month and employee.
+- Manual dues decisions/prepayments are prioritized over scanner-owned automatic records when resolving conflicts.
+- Dues scanner log IDs/messages are deduplicated and retained.
+- Dues reset baselines keep the newest reset timestamp.
+- Training history is unioned and deduplicated.
+- The training queue/order comes from whichever device has the newer rotation `updatedAt`.
+- Training `lastSeen` timestamps use the newest value per employee.
+- Company-management settings such as dues rules and stock limits can come across with the merged backup.
+- API keys, launcher placement, alert preferences, and other device-specific behavior remain local.
+
+### Restore safety
+- The old replacement-style import is still available as **Restore / Replace**.
+- Restore now shows a warning so it is not confused with the safer merge workflow.
+- API keys remain preserved during restore.
+
+### Notes
+- Merge is a practical local-device consolidation tool, not real-time sync. If the same management record is changed independently on two devices, conflict rules are applied.
+- Excel reports are for reading/sharing and are not importable back into Company Command Center.
+
 ## 1.1.1 - 2026-11-02
 
 Dues prepayment migration fix.
