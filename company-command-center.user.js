@@ -3783,6 +3783,47 @@
         return result;
     }
 
+    function xlsxUtf8Encode(value) {
+        const text = String(value == null ? '' : value);
+        const bytes = [];
+
+        for (let i = 0; i < text.length; i += 1) {
+            let code = text.charCodeAt(i);
+
+            if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
+                const next = text.charCodeAt(i + 1);
+                if (next >= 0xDC00 && next <= 0xDFFF) {
+                    code = 0x10000 + ((code - 0xD800) << 10) + (next - 0xDC00);
+                    i += 1;
+                }
+            }
+
+            if (code <= 0x7F) {
+                bytes.push(code);
+            } else if (code <= 0x7FF) {
+                bytes.push(
+                    0xC0 | (code >> 6),
+                    0x80 | (code & 0x3F)
+                );
+            } else if (code <= 0xFFFF) {
+                bytes.push(
+                    0xE0 | (code >> 12),
+                    0x80 | ((code >> 6) & 0x3F),
+                    0x80 | (code & 0x3F)
+                );
+            } else {
+                bytes.push(
+                    0xF0 | (code >> 18),
+                    0x80 | ((code >> 12) & 0x3F),
+                    0x80 | ((code >> 6) & 0x3F),
+                    0x80 | (code & 0x3F)
+                );
+            }
+        }
+
+        return new Uint8Array(bytes);
+    }
+
     function xlsxDosDateTime(date) {
         const d = date || new Date();
         const year = Math.max(1980, d.getFullYear());
@@ -3796,15 +3837,14 @@
     }
 
     function xlsxZip(files) {
-        const encoder = new TextEncoder();
         const localParts = [];
         const centralParts = [];
         let offset = 0;
         const dos = xlsxDosDateTime(new Date());
 
         files.forEach(function (file) {
-            const nameBytes = encoder.encode(file.name);
-            const dataBytes = typeof file.data === 'string' ? encoder.encode(file.data) : file.data;
+            const nameBytes = xlsxUtf8Encode(file.name);
+            const dataBytes = typeof file.data === 'string' ? xlsxUtf8Encode(file.data) : file.data;
             const crc = xlsxCrc32(dataBytes);
             const flags = 0x0800;
 
@@ -3862,9 +3902,7 @@
             xlsxLe16(0)
         ]);
 
-        return new Blob([local, central, end], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        });
+        return xlsxConcat([local, central, end]);
     }
 
     function buildExcelReportSheets() {
@@ -4202,7 +4240,10 @@
 
             files.push({ name: 'xl/styles.xml', data: xlsxStylesXml() });
 
-            const blob = xlsxZip(files);
+            const workbookBytes = xlsxZip(files);
+            const blob = new Blob([workbookBytes], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            });
             const safeName = String((state.profile && state.profile.name) || 'company')
                 .replace(/[^a-z0-9_-]+/gi, '-')
                 .replace(/^-+|-+$/g, '')
@@ -4284,6 +4325,14 @@
 
         const messages = new Set([].concat(localRecord.detectedMessages || [], incomingRecord.detectedMessages || []).map(String));
         if (messages.size) merged.detectedMessages = Array.from(messages);
+
+        if (merged.manualOverride) {
+            merged.auto = false;
+            merged.autoPrepay = false;
+        }
+        if (merged.prepaidManual) {
+            merged.autoPrepay = false;
+        }
 
         return merged;
     }
