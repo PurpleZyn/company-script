@@ -2,7 +2,7 @@
 
 A director-focused userscript for running a Torn company from one dashboard.
 
-**Current version:** 1.1.1
+**Current version:** 1.2.0
 
 ## Install
 
@@ -30,7 +30,7 @@ A **Limited** key or a suitably scoped **Custom** key is recommended. Director-l
 
 **Never place your API key in this GitHub repository.** The script stores the key locally through the userscript manager where supported and sends it only to Torn's API.
 
-## What v1.1.0 does
+## What v1.2.0 does
 
 ### Overview
 - Director Brief combining finances, training, dues, employee issues, stock risk, recruiting, staffing, and role optimization
@@ -143,8 +143,16 @@ The director can also use **NEXT**, **up**, **down**, and **SKIP** controls to o
 - Balanced achievable coverage when the ideal target cannot fit
 - Combined suggested reorders stay within remaining capacity
 
-### Local backup
-Settings (excluding the API key), financial snapshots, and eDVD records can be exported to JSON and imported later.
+### Data export, backup & multi-device merge
+- Export a JSON backup of local Company Command Center data
+- **Merge JSON backup** combines histories from another device instead of replacing the destination
+- Overlapping historical days keep the newer captured snapshot
+- Dues/prepayments and training history use conflict-aware merge rules
+- **Restore / Replace** remains available for full backup restoration
+- API keys remain local and are never included in backups
+- Export a formatted native Excel `.xlsx` report for sharing with others
+- Excel report includes summary, finance/history, employees, stock, dues/prepayments, training, recruiting, and configuration sheets
+- Excel exports are read-only reports and are not used for restoring the userscript
 
 ## Current limitations
 
